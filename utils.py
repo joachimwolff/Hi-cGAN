@@ -283,7 +283,8 @@ def writeCooler(pMatrixList, pBinSizeInt, pOutfile, pChromosomeList, pChromSizeL
         bins_tmp['start'] = np.uint32(binStartList)
         bins_tmp['end'] = np.uint32(binEndList)
         bins_tmp["chrom"] = str(chrom)
-        bins = bins.append(bins_tmp, ignore_index=True)
+        bins = pd.concat([bins, bins_tmp], ignore_index=True)
+        # bins = bins.append(bins_tmp, ignore_index=True)
         offsetList.append(offsetList[-1] + bins_tmp.shape[0])
     #correct dtypes for joint dataframe
     bins["start"] = bins["start"].astype("uint32")

@@ -6,6 +6,7 @@ from tensorflow import dtypes as tfdtypes
 from scipy.sparse import save_npz, csr_matrix
 from tqdm import tqdm
 
+
 class DataContainer():
     def __init__(self, chromosome, matrixfilepath, chromatinFolder, binsize=None):
         self.chromosome = str(chromosome)

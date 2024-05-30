@@ -8,6 +8,7 @@ import dataContainer
 import records
 
 
+
 @click.option("--trainMatrices", "-tm", required=True,
               type=click.Path(exists=True, dir_okay=False, readable=True), multiple=True,
               help="Cooler matrices for training. Use this option multiple times to specify more than one matrix. First matrix belongs to first trainChromPath")
@@ -31,7 +32,7 @@ import records
               default="64", show_default=True,
               help="Windowsize for submatrices. 64, 128 and 256 are supported")
 @click.option("--outfolder", "-o", required=True,
-              type=click.Path(exists=True, writable=True, file_okay=False), 
+              type=click.Path(exists=False, writable=True, file_okay=False), 
               help="Folder where trained model and diverse outputs will be stored")
 @click.option("--epochs", "-ep", required=True,
               type=click.IntRange(min=1), 
@@ -119,6 +120,9 @@ def training(trainmatrices,
              figuretype,
              recordsize,
              plotfrequency):
+
+    if not os.path.exists(outfolder):
+        os.mkdir(outfolder)
 
     #few constants
     windowsize = int(windowsize)
@@ -256,21 +260,29 @@ def training(trainmatrices,
         steps_per_epoch *= 2
     if pretrainedintromodel is None:
         pretrainedintromodel = ""
+
+    # strategy = tf.distribute.MirroredStrategy()
+    
+    # print('Number of devices: {}'.format(strategy.num_replicas_in_sync))
+    # with strategy.scope() as scope: 
     hicGanModel = hicGAN.HiCGAN(log_dir=outfolder, 
-                                number_factors=nr_factors,
-                                loss_weight_pixel=lossweightpixel,
-                                loss_weight_adversarial=lossweightadv,
-                                loss_weight_discriminator=lossweightdisc, 
-                                loss_type_pixel=losstypepixel, 
-                                loss_weight_tv=lossweighttv, 
-                                input_size=windowsize,
-                                learning_rate_generator=learningrategen,
-                                learning_rate_discriminator=learningratedisc,
-                                adam_beta_1=beta1,
-                                plot_type=figuretype,
-                                plot_frequency=plotfrequency,
-                                embedding_model_type=embeddingtype,
-                                pretrained_model_path=pretrainedintromodel)
+                                    number_factors=nr_factors,
+                                    loss_weight_pixel=lossweightpixel,
+                                    loss_weight_adversarial=lossweightadv,
+                                    loss_weight_discriminator=lossweightdisc, 
+                                    loss_type_pixel=losstypepixel, 
+                                    loss_weight_tv=lossweighttv, 
+                                    input_size=windowsize,
+                                    learning_rate_generator=learningrategen,
+                                    learning_rate_discriminator=learningratedisc,
+                                    adam_beta_1=beta1,
+                                    plot_type=figuretype,
+                                    plot_frequency=plotfrequency,
+                                    embedding_model_type=embeddingtype,
+                                    pretrained_model_path=pretrainedintromodel,
+                                    # scope=scope)
+                                    scope=None)
+    
     hicGanModel.plotModels(outputpath=outfolder, figuretype=figuretype)
     hicGanModel.fit(train_ds=trainDs, epochs=epochs, test_ds=validationDs, steps_per_epoch=steps_per_epoch)
 
@@ -279,4 +291,12 @@ def training(trainmatrices,
             os.remove(tfRecordfile)
 
 if __name__ == "__main__":
+    gpu = tf.config.list_physical_devices('GPU')
+    if gpu:
+        try:
+            for gpu_device in gpu:
+                tf.config.experimental.set_memory_growth(gpu_device, True)
+        except Exception as e:
+            print("Error: {}".format(e))
+    
     training() #pylint: disable=no-value-for-parameter

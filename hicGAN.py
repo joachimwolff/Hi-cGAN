@@ -26,7 +26,8 @@ class HiCGAN():
                     learning_rate_discriminator: float = 1e-6,
                     adam_beta_1: float = 0.5,
                     pretrained_model_path: str = "",
-                    embedding_model_type: str = "CNN"): 
+                    embedding_model_type: str = "CNN",
+                    scope=None): 
         super().__init__()
 
         self.OUTPUT_CHANNELS = 1
@@ -89,6 +90,8 @@ class HiCGAN():
 
         self.__epoch_counter = 0
         self.__batch_counter = 0
+
+        self.scope = scope
 
     def cnn_embedding(self, nr_filters_list=[1024,512,512,256,256,128,128,64], kernel_width_list=[4,4,4,4,4,4,4,4], apply_dropout: bool = False):  
         inputs = tf.keras.layers.Input(shape=(3*self.input_size, self.number_factors))
@@ -321,6 +324,10 @@ class HiCGAN():
         total_disc_loss = self.loss_weight_discriminator * (real_loss + generated_loss)
         return total_disc_loss, real_loss, generated_loss
 
+    @tf.function
+    def distributed_train_step(self, input_image, target, epoch):
+        per_replica_losses = self.scope.run(self.train_step, args=(input_image, target, epoch))
+        return self.scope.reduce(tf.distribute.ReduceOp.SUM, per_replica_losses, axis=None)
 
     @tf.function
     def train_step(self, input_image, target, epoch):
@@ -383,7 +390,9 @@ class HiCGAN():
             train_samples_in_epoch = 0
             for _, (input_image, target) in train_pbar:
                 train_samples_in_epoch += 1
+                # gen_loss, _, disc_loss_real, disc_loss_fake = self.distributed_train_step(input_image["factorData"], target["out_matrixData"], epoch)
                 gen_loss, _, disc_loss_real, disc_loss_fake = self.train_step(input_image["factorData"], target["out_matrixData"], epoch)
+
                 self.__disc_train_loss_true_batches.append(disc_loss_real)
                 self.__disc_train_loss_fake_batches.append(disc_loss_fake)
                 self.__gen_train_loss_batches.append(gen_loss)

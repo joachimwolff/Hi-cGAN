@@ -44,6 +44,9 @@ def prediction(trainedmodel,
                 batchsize,
                 windowsize
                 ):
+    
+    if not os.path.exists(outfolder):
+        os.mkdir(outfolder)
     scalefactors = True
     clampfactors = False
     scalematrix = True
