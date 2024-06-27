@@ -325,12 +325,16 @@ class HiCGAN():
         return total_disc_loss, real_loss, generated_loss
 
     @tf.function
-    def distributed_train_step(self, input_image, target, epoch):
-        per_replica_losses = self.scope.run(self.train_step, args=(input_image, target, epoch))
+    def distributed_train_step(self, input_data):
+        input_image, target = input_data[0]["factorData"], input_data[1]["out_matrixData"]
+        per_replica_losses = self.scope.run(self.train_step, args=(input_image, target, ))
         return self.scope.reduce(tf.distribute.ReduceOp.SUM, per_replica_losses, axis=None)
-
+    
     @tf.function
-    def train_step(self, input_image, target, epoch):
+    def train_step(self, input_image, target):
+        # print("train step")
+        # print(input)
+        # input_image, target = input[0]["factorData"], input[1]["out_matrixData"]
         with tf.GradientTape() as gen_tape, tf.GradientTape() as disc_tape:
             gen_output = self.generator(input_image, training=True)
 
@@ -379,19 +383,27 @@ class HiCGAN():
         del fig1, axs1
 
     def fit(self, train_ds, epochs, test_ds, steps_per_epoch: int):
+        distributed_dataset = self.scope.experimental_distribute_dataset(train_ds)
+
         for epoch in range(epochs):
             #generate sample output
             if epoch % self.example_plot_frequency == 0:
                 for example_input, example_target in test_ds.take(1):
                     self.generate_images(self.generator, example_input, example_target, epoch)
-            # Train
-            train_pbar = tqdm(train_ds.enumerate(), total=steps_per_epoch)
+            
+            
+            train_pbar = tqdm(total=steps_per_epoch)
             train_pbar.set_description("Epoch {:05d}".format(epoch+1))
             train_samples_in_epoch = 0
-            for _, (input_image, target) in train_pbar:
+
+            # for _, (input_image, target) in train_pbar:
+            for distributed_input in distributed_dataset:
+               
                 train_samples_in_epoch += 1
-                # gen_loss, _, disc_loss_real, disc_loss_fake = self.distributed_train_step(input_image["factorData"], target["out_matrixData"], epoch)
-                gen_loss, _, disc_loss_real, disc_loss_fake = self.train_step(input_image["factorData"], target["out_matrixData"], epoch)
+                # if self.scope is not None:
+                gen_loss, _, disc_loss_real, disc_loss_fake = self.distributed_train_step(distributed_input)
+                # else:
+                #     gen_loss, _, disc_loss_real, disc_loss_fake = self.train_step(input_image["factorData"], target["out_matrixData"], epoch)
 
                 self.__disc_train_loss_true_batches.append(disc_loss_real)
                 self.__disc_train_loss_fake_batches.append(disc_loss_fake)
@@ -402,7 +414,9 @@ class HiCGAN():
                 if len(self.__gen_val_loss_epochs) > 0:
                     train_bar_postfixDict["v"] = "{:.3f}".format(self.__gen_val_loss_epochs[-1])
                 train_pbar.set_postfix( train_bar_postfixDict )
+                train_pbar.update(1)
                 self.__batch_counter += 1
+            train_pbar.close()
             self.__gen_train_loss_epochs.append(np.mean(self.__gen_train_loss_batches[-train_samples_in_epoch:]))
             self.__disc_train_loss_true_epochs.append(np.mean(self.__disc_train_loss_true_batches[-train_samples_in_epoch:]))
             self.__disc_train_loss_fake_epochs.append(np.mean(self.__disc_train_loss_fake_batches[-train_samples_in_epoch:]))

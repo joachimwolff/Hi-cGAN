@@ -6,96 +6,103 @@ import tensorflow as tf
 import hicGAN
 import dataContainer
 import records
+import argparse
+# import tensorflow as tf
+from datetime import datetime
 
+import logging
+# tf.get_logger().setLevel(logging.INFO)
+# tf.debugging.set_log_device_placement(True)
 
+def parse_arguments(args=None):
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--trainMatrices", "-tm", required=True,
+                        type=str, nargs='+',
+                        help="Cooler matrices for training.")
+    parser.add_argument("--trainChroms", "-tchroms", required=True,
+                        type=str,
+                        help="Train chromosomes. Must be present in all train matrices.")
+    parser.add_argument("--trainChromPaths", "-tcp", required=True,
+                        type=str, nargs='+',
+                        help="Path where chromatin factors for training reside (bigwig files).")
+    parser.add_argument("--valMatrices", "-vm", required=True,
+                        type=str, nargs='+',
+                        help="Cooler matrices for validation.")
+    parser.add_argument("--valChroms", "-vchroms", required=True,
+                        type=str,
+                        help="Validation chromosomes. Must be present in all validation matrices.")
+    parser.add_argument("--valChromPaths", "-vcp", required=True,
+                        type=str, nargs='+',
+                        help="Path where chromatin factors for validation reside (bigwig files).")
+    parser.add_argument("--windowsize", "-ws", required=True,
+                        type=str, choices=["64", "128", "256"],
+                        help="Windowsize for submatrices.")
+    parser.add_argument("--outfolder", "-o", required=True,
+                        type=str,
+                        help="Folder where trained model and diverse outputs will be stored.")
+    parser.add_argument("--epochs", "-ep", required=True,
+                        type=int, default=10,
+                        help="Number of epochs for training.")
+    parser.add_argument("--batchsize", "-bs", required=False,
+                        type=int, default=32,
+                        help="Batch size for training.")
+    parser.add_argument("--lossWeightPixel", "-lwp", required=False,
+                        type=float,
+                        default=100.0,
+                        help="Loss weight for L1/L2 error of generator.")
+    parser.add_argument("--lossWeightDisc", "-lwd", required=False,
+                        type=float,
+                        default=0.5,
+                        help="Loss weight (multiplicator) for the discriminator loss.")
+    parser.add_argument("--lossTypePixel", "-ltp", required=False,
+                        type=str, choices=["L1", "L2"],
+                        default="L1",
+                        help="Type of per-pixel loss to use for the generator.")
+    parser.add_argument("--lossWeightTv", "-lwt", required=False,
+                        type=float,
+                        default=1e-10,
+                        help="Loss weight for Total-Variation-loss of generator.")
+    parser.add_argument("--lossWeightAdv", "-lwa", required=False,
+                        type=float,
+                        default=1.0,
+                        help="Loss weight for adversarial loss in generator.")
+    parser.add_argument("--learningRateGen", "-lrg", required=False,
+                        type=float,
+                        default=2e-5,
+                        help="Learning rate for Adam optimizer of generator.")
+    parser.add_argument("--learningRateDisc", "-lrd", required=False,
+                        type=float,
+                        default=1e-6,
+                        help="Learning rate for Adam optimizer of discriminator.")
+    parser.add_argument("--beta1", "-b1", required=False,
+                        type=float,
+                        default=0.5,
+                        help="Beta1 parameter for Adam optimizers (gen. and disc.)")
+    parser.add_argument("--flipsamples", "-fs", required=False,
+                        action='store_true',
+                        help="Flip training matrices and chromatin features (data augmentation).")
+    parser.add_argument("--embeddingType", "-emb", required=False,
+                        type=str, choices=["CNN", "DNN", "mixed"],
+                        default="CNN",
+                        help="Type of embedding to use for generator and discriminator.")
+    parser.add_argument("--pretrainedIntroModel", "-ptm", required=False,
+                        type=str,
+                        help="Pretrained model for 1D-2D conversion of inputs.")
+    parser.add_argument("--figuretype", "-ft", required=False,
+                        type=str, choices=["png", "pdf", "svg"],
+                        default="png",
+                        help="Figure type for all plots.")
+    parser.add_argument("--recordsize", "-rs", required=False,
+                        type=int,
+                        default=2000,
+                        help="Approx. size (number of samples) of the tfRecords used in the data pipeline for training.")
+    parser.add_argument("--plotFrequency", "-pfreq", required=False,
+                        type=int,
+                        default=10,
+                        help="Update loss over epoch plots after this number of epochs.")
 
-@click.option("--trainMatrices", "-tm", required=True,
-              type=click.Path(exists=True, dir_okay=False, readable=True), multiple=True,
-              help="Cooler matrices for training. Use this option multiple times to specify more than one matrix. First matrix belongs to first trainChromPath")
-@click.option("--trainChroms", "-tchroms", required=True,
-              type=str, 
-              help="Train chromosomes. Must be present in all train matrices. Specify multiple chroms separated by spaces, e.g. '10 11 12'.")
-@click.option("--trainChromPaths", "-tcp", required=True,
-              type=click.Path(exists=True, file_okay=False, readable=True), multiple=True,
-              help="Path where chromatin factors for training reside (bigwig files). Use this option multiple times to specify more than one path. First path belongs to first train matrix")
-@click.option("--valMatrices", "-vm", required=True,
-              type=click.Path(exists=True, dir_okay=False, readable=True), multiple=True,
-              help="Cooler matrices for validation. Use this option multiple times to specify more than one matrix")
-@click.option("--valChroms", "-vchroms", required=True,
-              type=str,
-              help="Validation chromosomes. Must be present in all validation matrices. Specify multiple chroms separated by spaces, e.g. '1 2 3'.")
-@click.option("--valChromPaths", "-vcp", required=True,
-              type=click.Path(exists=True, file_okay=False, readable=True), multiple=True,
-              help="Path where chromatin factors for validation reside (bigwig files). Use this option multiple times to specify more than one path. First path belongs to first validation matrix etc.")
-@click.option("--windowsize", "-ws", required=True,
-              type=click.Choice(["64", "128", "256"]), 
-              default="64", show_default=True,
-              help="Windowsize for submatrices. 64, 128 and 256 are supported")
-@click.option("--outfolder", "-o", required=True,
-              type=click.Path(exists=False, writable=True, file_okay=False), 
-              help="Folder where trained model and diverse outputs will be stored")
-@click.option("--epochs", "-ep", required=True,
-              type=click.IntRange(min=1), 
-              default=2, show_default=True)
-@click.option("--batchsize", "-bs", required=True,
-              type=click.IntRange(min=1, max=256), 
-              default=32, show_default=True, 
-              help="Batch size for training, choose integer in [1, 256]")
-@click.option("--lossWeightPixel", "-lwp", required=False,
-              type=click.FloatRange(min=1e-10), 
-              default=100.0, show_default=True, 
-              help="loss weight for L1/L2 error of generator")
-@click.option("--lossWeightDisc", "-lwd", required=False,
-              type=click.FloatRange(min=1e-10),
-              default=0.5, show_default=True,
-              help="loss weight (multiplicator) for the discriminator loss")
-@click.option("--lossTypePixel", "-ltp", required=False,
-             type=click.Choice(["L1", "L2"]), 
-             default="L1", show_default=True,
-             help="Type of per-pixel loss to use for the generator; choose from L1 (mean abs. error) or L2 (mean squared error)")
-@click.option("--lossWeightTv", "-lwt", required=False,
-             type=click.FloatRange(min=0.0),
-             default=1e-10, show_default=True,
-             help="loss weight for Total-Variation-loss of generator; higher value - more smoothing")
-@click.option("--lossWeightAdv", "-lwa", required=False,
-              type=click.FloatRange(min=1e-10), 
-              default=1.0, show_default=True,
-              help="loss weight for adversarial loss in generator")
-@click.option("--learningRateGen", "-lrg", required=False,
-              type=click.FloatRange(min=1e-10, max=1.0), 
-              default=2e-5, show_default=True,
-              help="learning rate for Adam optimizer of generator")
-@click.option("--learningRateDisc", "-lrd", required=False,
-              type=click.FloatRange(min=1e-10, max=1.0),
-              default=1e-6, show_default=True,
-              help="learning rate for Adam optimizer of discriminator")
-@click.option("--beta1", "-b1", required=False,
-              type=click.FloatRange(min=1e-2, max=1.0),
-              default=0.5, show_default=True,
-              help="beta1 parameter for Adam optimizers (gen. and disc.)")
-@click.option("--flipsamples", "-fs", required=False,
-             type=bool, default=False, show_default=True,
-             help="Flip training matrices and chromatin features (data augmentation)")
-@click.option("--embeddingType", "-emb", required=False,
-             type=click.Choice(["CNN", "DNN", "mixed"]),
-             default="CNN", show_default=True,
-             help="Type of embedding to use for generator and discriminator. CNN, DNN, or mixed (Gen: CNN, Disc: DNN)")
-@click.option("--pretrainedIntroModel", "-ptm", required=False,
-             type=click.Path(exists=True, dir_okay=False, readable=True),
-             help="pretrained model for 1D-2D conversion of inputs")
-@click.option("--figuretype", "-ft", required=False,
-             type=click.Choice(["png", "pdf", "svg"]), 
-             default="png", show_default=True,
-             help="Figure type for all plots")
-@click.option("--recordsize", "-rs", required=False,
-             type=click.IntRange(min=10), 
-             default=2000, show_default=True,
-             help="Approx. size (number of samples) of the tfRecords used in the data pipeline for training. Lower values = less memory consumption, but maybe longer runtime")
-@click.option("--plotFrequency", "-pfreq", required=False,
-             type=click.IntRange(min=1),
-             default=10, show_default=True,
-             help="Update loss over epoch plots after this number of epochs")
-@click.command()
+    return parser
+
 def training(trainmatrices, 
              trainchroms, 
              trainchrompaths, 
@@ -119,7 +126,7 @@ def training(trainmatrices,
              pretrainedintromodel,
              figuretype,
              recordsize,
-             plotfrequency):
+             plotfrequency, scope=None):
 
     if not os.path.exists(outfolder):
         os.mkdir(outfolder)
@@ -157,21 +164,36 @@ def training(trainmatrices,
 
     #prepare the training data containers. No data is loaded yet.
     traindataContainerList = []
-    for chrom in trainChromNameList:
-        for matrix, chromatinpath in zip(trainmatrices, trainchrompaths):
-            container = dataContainer.DataContainer(chromosome=chrom,
-                                                    matrixfilepath=matrix,
-                                                    chromatinFolder=chromatinpath)
-            traindataContainerList.append(container)
+    import concurrent.futures
+
+    def create_container(chrom, matrix, chromatinpath):
+        container = dataContainer.DataContainer(chromosome=chrom,
+                                                matrixfilepath=matrix,
+                                                chromatinFolder=chromatinpath)
+        return container
+
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        for chrom in trainChromNameList:
+            for matrix, chromatinpath in zip(trainmatrices, trainchrompaths):
+                future = executor.submit(create_container, chrom, matrix, chromatinpath)
+                traindataContainerList.append(future.result())
 
     #prepare the validation data containers. No data is loaded yet.
     valdataContainerList = []
-    for chrom in valChromNameList:
-        for matrix, chromatinpath in zip(valmatrices, valchrompaths):
-            container = dataContainer.DataContainer(chromosome=chrom,
-                                                    matrixfilepath=matrix,
-                                                    chromatinFolder=chromatinpath)
-            valdataContainerList.append(container)
+    import concurrent.futures
+
+    def create_container(chrom, matrix, chromatinpath):
+        container = dataContainer.DataContainer(chromosome=chrom,
+                                                matrixfilepath=matrix,
+                                                chromatinFolder=chromatinpath)
+        return container
+
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        for chrom in valChromNameList:
+            for matrix, chromatinpath in zip(valmatrices, valchrompaths):
+                future = executor.submit(create_container, chrom, matrix, chromatinpath)
+                valdataContainerList.append(future.result())
+
 
     #define the load params for the containers
     loadParams = {"scaleFeatures": True,
@@ -261,10 +283,6 @@ def training(trainmatrices,
     if pretrainedintromodel is None:
         pretrainedintromodel = ""
 
-    # strategy = tf.distribute.MirroredStrategy()
-    
-    # print('Number of devices: {}'.format(strategy.num_replicas_in_sync))
-    # with strategy.scope() as scope: 
     hicGanModel = hicGAN.HiCGAN(log_dir=outfolder, 
                                     number_factors=nr_factors,
                                     loss_weight_pixel=lossweightpixel,
@@ -280,17 +298,26 @@ def training(trainmatrices,
                                     plot_frequency=plotfrequency,
                                     embedding_model_type=embeddingtype,
                                     pretrained_model_path=pretrainedintromodel,
-                                    # scope=scope)
-                                    scope=None)
+                                    scope=scope)
+                                    # scope=None)
     
     hicGanModel.plotModels(outputpath=outfolder, figuretype=figuretype)
+    # logdir = "./logs/profile/" + datetime.now().strftime("%Y%m%d-%H%M%S")
+
+    # tf.profiler.experimental.Client.start(logdir)
+
     hicGanModel.fit(train_ds=trainDs, epochs=epochs, test_ds=validationDs, steps_per_epoch=steps_per_epoch)
 
-    for tfRecordfile in traindataRecords + valdataRecords:
-        if os.path.exists(tfRecordfile):
-            os.remove(tfRecordfile)
+    # tf.profiler.experimental.Client.stop(logdir)
 
-if __name__ == "__main__":
+
+    # for tfRecordfile in traindataRecords + valdataRecords:
+    #     if os.path.exists(tfRecordfile):
+    #         os.remove(tfRecordfile)
+
+def main(args=None):
+    args = parse_arguments().parse_args(args)
+    print(args)
     gpu = tf.config.list_physical_devices('GPU')
     if gpu:
         try:
@@ -299,4 +326,41 @@ if __name__ == "__main__":
         except Exception as e:
             print("Error: {}".format(e))
     
-    training() #pylint: disable=no-value-for-parameter
+    strategy = tf.distribute.MirroredStrategy()
+
+
+    # tf.profiler.experimental.start(logdir)
+    # print('Number of devices: {}'.format(strategy.num_replicas_in_sync))
+    # print('Number of devices: {}'.format(strategy.num_replicas_in_sync))
+    with strategy.scope() as scope: 
+        training(
+            trainmatrices=args.trainMatrices,
+            trainchroms=args.trainChroms,
+            trainchrompaths=args.trainChromPaths,
+            valmatrices=args.valMatrices,
+            valchroms=args.valChroms,
+            valchrompaths=args.valChromPaths,
+            windowsize=args.windowsize,
+            outfolder=args.outfolder,
+            epochs=args.epochs,
+            batchsize=args.batchsize,
+            lossweightpixel=args.lossWeightPixel,
+            lossweightdisc=args.lossWeightDisc,
+            lossweightadv=args.lossWeightAdv,
+            losstypepixel=args.lossTypePixel,
+            lossweighttv=args.lossWeightTv,
+            learningrategen=args.learningRateGen,
+            learningratedisc=args.learningRateDisc,
+            beta1=args.beta1,
+            flipsamples=args.flipsamples,
+            embeddingtype=args.embeddingType,
+            pretrainedintromodel=args.pretrainedIntroModel,
+            figuretype=args.figuretype,
+            recordsize=args.recordsize,
+            plotfrequency=args.plotFrequency,
+            # scope=None,
+            scope=scope
+        )  # pylint: disable=no-value-for-parameter
+
+if __name__ == "__main__":
+    main()
