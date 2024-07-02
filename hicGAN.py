@@ -32,7 +32,7 @@ class HiCGAN():
         self.OUTPUT_CHANNELS = 1
         self.INPUT_CHANNELS = 1
         self.input_size = 256
-        if input_size in [64,128,256]:
+        if input_size in [64,128,256, 512]:
             self.input_size = input_size
         self.number_factors = number_factors
         self.loss_weight_pixel = loss_weight_pixel

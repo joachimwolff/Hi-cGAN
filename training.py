@@ -35,7 +35,7 @@ def parse_arguments(args=None):
                         type=str, nargs='+',
                         help="Path where chromatin factors for validation reside (bigwig files).")
     parser.add_argument("--windowsize", "-ws", required=True,
-                        type=str, choices=["64", "128", "256"],
+                        type=str, choices=["64", "128", "256", "512"],
                         help="Windowsize for submatrices.")
     parser.add_argument("--outfolder", "-o", required=True,
                         type=str,
