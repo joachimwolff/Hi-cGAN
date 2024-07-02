@@ -87,7 +87,9 @@ class DataContainer():
         msg = "Loaded {:d} chromatin features from folder {:s}\n"
         msg = msg.format(self.nr_factors, self.chromatinFolder)
         featLoadedMsgList = [] #pretty printing for features loaded
-        for i, bigwigFile in enumerate(bigwigFileList):
+        import concurrent.futures
+
+        def process_bigwig_file(bigwigFile):
             chromname = self.prefixDict_factors[bigwigFile] + self.chromosome
             tmpArray = utils.binChromatinFactor(pBigwigFileName=bigwigFile,
                                                 pBinSizeInt=self.binsize,
@@ -97,12 +99,18 @@ class DataContainer():
                 tmpArray = utils.clampArray(tmpArray)
             if scaleFeatures:
                 tmpArray = utils.scaleArray(tmpArray)
-            self.FactorDataArray[i] = tmpArray
-            nr_nonzero_abs = np.count_nonzero(tmpArray)
-            nr_nonzero_perc = nr_nonzero_abs / tmpArray.size * 100
-            msg2 = "{:s} - min. {:.3f} - max. {:.3f} - nnz. {:d} ({:.2f}%)"
-            msg2 = msg2.format(bigwigFile, tmpArray.min(), tmpArray.max(), nr_nonzero_abs, nr_nonzero_perc)
-            featLoadedMsgList.append(msg2)
+            return tmpArray
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = [executor.submit(process_bigwig_file, bigwigFile) for bigwigFile in bigwigFileList]
+            for i, future in enumerate(concurrent.futures.as_completed(futures)):
+                tmpArray = future.result()
+                self.FactorDataArray[i] = tmpArray
+                nr_nonzero_abs = np.count_nonzero(tmpArray)
+                nr_nonzero_perc = nr_nonzero_abs / tmpArray.size * 100
+                msg2 = "{:s} - min. {:.3f} - max. {:.3f} - nnz. {:d} ({:.2f}%)"
+                msg2 = msg2.format(bigwigFileList[i], tmpArray.min(), tmpArray.max(), nr_nonzero_abs, nr_nonzero_perc)
+                featLoadedMsgList.append(msg2)
         self.FactorDataArray = np.transpose(self.FactorDataArray)
         print(msg + "\n".join(featLoadedMsgList))
             

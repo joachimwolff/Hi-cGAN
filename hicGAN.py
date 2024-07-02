@@ -26,7 +26,6 @@ class HiCGAN():
                     learning_rate_discriminator: float = 1e-6,
                     adam_beta_1: float = 0.5,
                     pretrained_model_path: str = "",
-                    embedding_model_type: str = "CNN",
                     scope=None): 
         super().__init__()
 
@@ -43,19 +42,9 @@ class HiCGAN():
         self.loss_type_pixel = loss_type_pixel
         self.generator_optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate_generator, beta_1=adam_beta_1, name="Adam_Generator")
         self.discriminator_optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate_discriminator, beta_1=adam_beta_1, name="Adam_Discriminator")
-        #choose the desired embedding network: DNN (like Farre et al.) or CNN
-        if embedding_model_type not in ["DNN", "CNN", "mixed"]:
-            msg = "Embedding {:s} not supported".format(embedding_model_type)
-            raise NotImplementedError(msg)
-        if embedding_model_type == "DNN":
-            self.generator_embedding = self.dnn_embedding(pretrained_model_path=pretrained_model_path)
-            self.discriminator_embedding = self.dnn_embedding(pretrained_model_path=pretrained_model_path)
-        elif embedding_model_type == "mixed":
-            self.generator_embedding = self.dnn_embedding(pretrained_model_path=pretrained_model_path)
-            self.discriminator_embedding = self.cnn_embedding()
-        else:
-            self.generator_embedding = self.cnn_embedding()
-            self.discriminator_embedding = self.cnn_embedding()         
+
+        self.generator_embedding = self.cnn_embedding()
+        self.discriminator_embedding = self.cnn_embedding()         
         self.generator = self.Generator()
         self.discriminator = self.Discriminator()
 
@@ -129,42 +118,6 @@ class HiCGAN():
         #model.summary()
         return model
 
-    def dnn_embedding(self, pretrained_model_path : str = ""):
-        inputs = tf.keras.layers.Input(shape=(3*self.input_size, self.number_factors))
-        x = Conv1D(filters=1,
-                    kernel_size=1,
-                    strides=1, 
-                    padding="valid",
-                    data_format="channels_last",
-                    activation="sigmoid")(inputs)
-        x = Flatten(name="flatten_1")(x)
-        for i, nr_neurons in enumerate([460,881,1690]):
-            layerName = "dense_" + str(i+1)
-            x = Dense(nr_neurons, activation="relu", kernel_regularizer="l2", name=layerName)(x)
-            layerName = "dropout_" + str(i+1)
-            x = Dropout(0.1, name=layerName)(x)
-        nr_output_neurons = (self.input_size * (self.input_size + 1)) // 2
-        x = Dense(nr_output_neurons, activation="relu",kernel_regularizer="l2", name="dense_out")(x)
-        dnn_model = tf.keras.Model(inputs=inputs, outputs=x)
-        if pretrained_model_path != "":
-            try:
-                dnn_model.load_weights(pretrained_model_path)
-                print("model weights successfully loaded")
-            except Exception as e:
-                msg = str(e)
-                msg += "\nCould not load the weights of pre-trained model"
-                print(msg)
-        inputs2 = tf.keras.layers.Input(shape=(3*self.input_size, self.number_factors))
-        x = dnn_model(inputs2)
-        #place the upper triangular part from dnn model into full matrix
-        x = CustomReshapeLayer(self.input_size)(x)
-        #symmetrize the output
-        x_T = tf.keras.layers.Permute((2,1))(x)
-        diag = tf.keras.layers.Lambda(lambda z: -1*tf.linalg.band_part(z, 0, 0))(x)
-        x = tf.keras.layers.Add()([x, x_T, diag])
-        out = tf.keras.layers.Reshape((self.input_size, self.input_size, self.INPUT_CHANNELS))(x)
-        dnn_embedding = tf.keras.Model(inputs=inputs2, outputs=out, name="DNN-embedding")
-        return dnn_embedding
 
     @staticmethod
     def downsample(filters, size, apply_batchnorm=True):
@@ -332,9 +285,6 @@ class HiCGAN():
     
     @tf.function
     def train_step(self, input_image, target):
-        # print("train step")
-        # print(input)
-        # input_image, target = input[0]["factorData"], input[1]["out_matrixData"]
         with tf.GradientTape() as gen_tape, tf.GradientTape() as disc_tape:
             gen_output = self.generator(input_image, training=True)
 
@@ -396,14 +346,10 @@ class HiCGAN():
             train_pbar.set_description("Epoch {:05d}".format(epoch+1))
             train_samples_in_epoch = 0
 
-            # for _, (input_image, target) in train_pbar:
             for distributed_input in distributed_dataset:
                
                 train_samples_in_epoch += 1
-                # if self.scope is not None:
                 gen_loss, _, disc_loss_real, disc_loss_fake = self.distributed_train_step(distributed_input)
-                # else:
-                #     gen_loss, _, disc_loss_real, disc_loss_fake = self.train_step(input_image["factorData"], target["out_matrixData"], epoch)
 
                 self.__disc_train_loss_true_batches.append(disc_loss_real)
                 self.__disc_train_loss_fake_batches.append(disc_loss_fake)

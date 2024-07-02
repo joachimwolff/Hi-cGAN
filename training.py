@@ -81,10 +81,6 @@ def parse_arguments(args=None):
     parser.add_argument("--flipsamples", "-fs", required=False,
                         action='store_true',
                         help="Flip training matrices and chromatin features (data augmentation).")
-    parser.add_argument("--embeddingType", "-emb", required=False,
-                        type=str, choices=["CNN", "DNN", "mixed"],
-                        default="CNN",
-                        help="Type of embedding to use for generator and discriminator.")
     parser.add_argument("--pretrainedIntroModel", "-ptm", required=False,
                         type=str,
                         help="Pretrained model for 1D-2D conversion of inputs.")
@@ -102,6 +98,11 @@ def parse_arguments(args=None):
                         help="Update loss over epoch plots after this number of epochs.")
 
     return parser
+def create_container(chrom, matrix, chromatinpath):
+        container = dataContainer.DataContainer(chromosome=chrom,
+                                                matrixfilepath=matrix,
+                                                chromatinFolder=chromatinpath)
+        return container
 
 def training(trainmatrices, 
              trainchroms, 
@@ -122,7 +123,6 @@ def training(trainmatrices,
              learningratedisc,
              beta1,
              flipsamples,
-             embeddingtype,
              pretrainedintromodel,
              figuretype,
              recordsize,
@@ -166,13 +166,9 @@ def training(trainmatrices,
     traindataContainerList = []
     import concurrent.futures
 
-    def create_container(chrom, matrix, chromatinpath):
-        container = dataContainer.DataContainer(chromosome=chrom,
-                                                matrixfilepath=matrix,
-                                                chromatinFolder=chromatinpath)
-        return container
+    
 
-    with concurrent.futures.ThreadPoolExecutor() as executor:
+    with concurrent.futures.ProcessPoolExecutor() as executor:
         for chrom in trainChromNameList:
             for matrix, chromatinpath in zip(trainmatrices, trainchrompaths):
                 future = executor.submit(create_container, chrom, matrix, chromatinpath)
@@ -180,20 +176,12 @@ def training(trainmatrices,
 
     #prepare the validation data containers. No data is loaded yet.
     valdataContainerList = []
-    import concurrent.futures
 
-    def create_container(chrom, matrix, chromatinpath):
-        container = dataContainer.DataContainer(chromosome=chrom,
-                                                matrixfilepath=matrix,
-                                                chromatinFolder=chromatinpath)
-        return container
-
-    with concurrent.futures.ThreadPoolExecutor() as executor:
+    with concurrent.futures.ProcessPoolExecutor() as executor:
         for chrom in valChromNameList:
             for matrix, chromatinpath in zip(valmatrices, valchrompaths):
                 future = executor.submit(create_container, chrom, matrix, chromatinpath)
                 valdataContainerList.append(future.result())
-
 
     #define the load params for the containers
     loadParams = {"scaleFeatures": True,
@@ -296,24 +284,12 @@ def training(trainmatrices,
                                     adam_beta_1=beta1,
                                     plot_type=figuretype,
                                     plot_frequency=plotfrequency,
-                                    embedding_model_type=embeddingtype,
                                     pretrained_model_path=pretrainedintromodel,
                                     scope=scope)
-                                    # scope=None)
     
     hicGanModel.plotModels(outputpath=outfolder, figuretype=figuretype)
-    # logdir = "./logs/profile/" + datetime.now().strftime("%Y%m%d-%H%M%S")
-
-    # tf.profiler.experimental.Client.start(logdir)
 
     hicGanModel.fit(train_ds=trainDs, epochs=epochs, test_ds=validationDs, steps_per_epoch=steps_per_epoch)
-
-    # tf.profiler.experimental.Client.stop(logdir)
-
-
-    # for tfRecordfile in traindataRecords + valdataRecords:
-    #     if os.path.exists(tfRecordfile):
-    #         os.remove(tfRecordfile)
 
 def main(args=None):
     args = parse_arguments().parse_args(args)
@@ -329,9 +305,6 @@ def main(args=None):
     strategy = tf.distribute.MirroredStrategy()
 
 
-    # tf.profiler.experimental.start(logdir)
-    # print('Number of devices: {}'.format(strategy.num_replicas_in_sync))
-    # print('Number of devices: {}'.format(strategy.num_replicas_in_sync))
     with strategy.scope() as scope: 
         training(
             trainmatrices=args.trainMatrices,
@@ -353,7 +326,6 @@ def main(args=None):
             learningratedisc=args.learningRateDisc,
             beta1=args.beta1,
             flipsamples=args.flipsamples,
-            embeddingtype=args.embeddingType,
             pretrainedintromodel=args.pretrainedIntroModel,
             figuretype=args.figuretype,
             recordsize=args.recordsize,
