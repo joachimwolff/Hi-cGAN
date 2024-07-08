@@ -1,0 +1,13 @@
+click
+cooler
+graphviz
+matplotlib
+numpy
+pandas<2.0
+pybigwig
+pydot
+python
+scikit-learn
+scipy
+tensorflow-gpu  
+tqdm

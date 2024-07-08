@@ -204,6 +204,9 @@ class DataContainer():
         windowsizeOK = self.windowsize == container.windowsize
         flankingsizeOK = self.flankingsize == container.flankingsize
         maxdistOK = self.maxdist == container.maxdist
+        log.debug("Factors: {:s} -- Matrix: {:s} -- Windowsize: {:s} -- Flankingsize: {:s} -- Maxdist: {:s}".format(str(factorsOK), str(matrixOK), str(windowsizeOK), str(flankingsizeOK), str(maxdistOK)))
+        log.debug("Chromatin folder: {:s} -- Nr. factors: {:s}".format(str(self.chromatinFolder), str(self.nr_factors)))
+        log.debug("Chromatin folder: {:s} -- Nr. factors: {:s}".format(str(container.chromatinFolder), str(container.nr_factors)))
         #sanity check loading of bigwig files
         if self.chromatinFolder is not None and self.nr_factors is None:
             return False
@@ -211,7 +214,9 @@ class DataContainer():
             return False
         #if chromatin factors are present, the numbers and names of chromatin factors must match
         factorsOK = factorsOK and (self.nr_factors == container.nr_factors)
-        factorsOK = factorsOK and (self.factorNames == container.factorNames)
+        # factorsOK = factorsOK and (self.factorNames == container.factorNames)
+        log.debug("self.nr_factors: {:d} -- container.nr_factors: {:d}".format(self.nr_factors, container.nr_factors))
+        log.debug("self.factorNames: {:s} -- container.factorNames: {:s}".format(str(self.factorNames), str(container.factorNames)))
         return factorsOK and matrixOK and windowsizeOK and flankingsizeOK and maxdistOK
         
     def writeTFRecord(self, pOutfolder, pRecordSize=None):
