@@ -6,6 +6,8 @@ from tensorflow import dtypes as tfdtypes
 from scipy.sparse import save_npz, csr_matrix
 from tqdm import tqdm
 
+import logging as log
+log.basicConfig(level=log.DEBUG)
 
 class DataContainer():
     def __init__(self, chromosome, matrixfilepath, chromatinFolder, binsize=None):
@@ -245,11 +247,26 @@ class DataContainer():
         #write the single files
         folderName = self.chromatinFolder.rstrip("/").replace("/","-")
         recordfiles = [os.path.join(pOutfolder, "{:s}_{:s}_{:03d}.tfrecord".format(folderName, str(self.chromosome), i + 1)) for i in range(nr_files)]
-        for recordfile, firstIndex, lastIndex in tqdm(zip(recordfiles, sample_indices, sample_indices[1:]), desc="Storing TFRecord files", total=len(recordfiles)):
+        import concurrent.futures
+
+        def storeTFRecord(recordfile, firstIndex, lastIndex, outfolder):
+            log.debug("Prepare dict...")
             recordDict, storedFeaturesDict = self.__prepareWriteoutDict(pFirstIndex=firstIndex, 
                                                                         pLastIndex=lastIndex, 
-                                                                        pOutfolder=pOutfolder)
+                                                                        pOutfolder=outfolder)
+            log.debug("Prepare dict... DONE!")
+            log.debug("Write TFRecord...")
             records.writeTFRecord(pFilename=recordfile, pRecordDict=recordDict)
+            log.debug("Write TFRecord... DONE!")
+
+            return storedFeaturesDict
+
+        storedFeaturesDictList = []
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            results = [executor.submit(storeTFRecord, recordfile, firstIndex, lastIndex, pOutfolder) for recordfile, firstIndex, lastIndex in zip(recordfiles, sample_indices, sample_indices[1:])]
+            for future in concurrent.futures.as_completed(results):
+                storedFeaturesDict = future.result()
+                storedFeaturesDictList.append(storedFeaturesDict)
         self.storedFiles = recordfiles
         self.storedFeatures = storedFeaturesDict
         return recordfiles
@@ -391,15 +408,32 @@ class DataContainer():
         if not self.data_loaded:
             msg = "Error: no data loaded, nothing to prepare"
             raise RuntimeError(msg)
-        data = [ self.getSampleData(idx=i) for i in range(pFirstIndex, pLastIndex) ]
+        import concurrent.futures
+
+        def get_sample_data(idx):
+            return self.getSampleData(idx=idx)
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            data = list(executor.map(get_sample_data, range(pFirstIndex, pLastIndex)))
         recordDict = dict()
         storedFeaturesDict = dict()
         if len(data) < 1:
             msg = "Error: No data to write"
             raise RuntimeError(msg)
+        import concurrent.futures
+
         for key in data[0]:
             featData = [feature[key] for feature in data]
             if not any(elem is None for elem in featData):
                 recordDict[key] = np.array(featData)
                 storedFeaturesDict[key] = {"shape": recordDict[key].shape[1:], "dtype": tfdtypes.as_dtype(recordDict[key].dtype)}
+
+        def process_feature(key):
+            featData = [feature[key] for feature in data]
+            if not any(elem is None for elem in featData):
+                recordDict[key] = np.array(featData)
+                storedFeaturesDict[key] = {"shape": recordDict[key].shape[1:], "dtype": tfdtypes.as_dtype(recordDict[key].dtype)}
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            executor.map(process_feature, data[0].keys())
         return recordDict, storedFeaturesDict

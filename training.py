@@ -330,7 +330,6 @@ def main(args=None):
             figuretype=args.figuretype,
             recordsize=args.recordsize,
             plotfrequency=args.plotFrequency,
-            # scope=None,
             scope=scope
         )  # pylint: disable=no-value-for-parameter
 

@@ -1,5 +1,6 @@
 import tensorflow as tf
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor
 
 #parse serialized input to tensors
 def parse_function(example_proto, descriptionDict):
@@ -43,8 +44,14 @@ def writeTFRecord(pFilename: str, pRecordDict: dict):
     with tf.io.TFRecordWriter(pFilename, options="GZIP") as writer:
         for i in range(list(batches)[0]):
             feature = dict()
-            for key in pRecordDict:
-                feature[key] = _bytes_feature( pRecordDict[key][i].flatten().tostring() )
+            def process_feature(key):
+                return key, _bytes_feature(pRecordDict[key][i].flatten().tostring())
+
+            with ThreadPoolExecutor() as executor:
+                futures = [executor.submit(process_feature, key) for key in pRecordDict]
+                for future in futures:
+                    key, value = future.result()
+                    feature[key] = value
             example = tf.train.Example(features=tf.train.Features(feature=feature))
             writer.write(example.SerializeToString())
 

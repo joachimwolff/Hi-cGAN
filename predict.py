@@ -32,7 +32,7 @@ import utils
               default=32, show_default=True,
               help="batchsize for predicting")
 @click.option("--windowsize", "-ws", required=True,
-              type=click.Choice(choices=["64", "128", "256"]),
+              type=click.Choice(choices=["64", "128", "256", "512"]),
               help="windowsize for predicting; must be the same as in trained model. Supported values are 64, 128 and 256")
 @click.command()
 def prediction(trainedmodel, 
