@@ -2,6 +2,10 @@ import tensorflow as tf
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 
+import logging
+log = logging.getLogger(__name__)
+
+
 #parse serialized input to tensors
 def parse_function(example_proto, descriptionDict):
     featDict = dict()

@@ -12,6 +12,10 @@ from scipy import sparse
 from sklearn import metrics as metrics
 import traceback
 
+import logging
+log = logging.getLogger(__name__)
+
+
 def getBigwigFileList(pDirectory):
     #returns a list of bigwig files in pDirectory
     retList = []

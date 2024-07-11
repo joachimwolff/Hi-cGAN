@@ -3,10 +3,10 @@ cooler
 graphviz
 matplotlib
 numpy
-pandas<2.0
+pandas <2.0
 pybigwig
 pydot
-python
+python >=3.9
 scikit-learn
 scipy
 tensorflow-gpu  

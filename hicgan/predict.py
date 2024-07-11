@@ -1,4 +1,4 @@
-import click
+import argparse
 import numpy as np
 import os
 import csv
@@ -7,44 +7,53 @@ import dataContainer
 import records
 import hicGAN
 import utils
+import logging
+from hicgan._version import __version__
 
-@click.option("--trainedModel", "-trm", required=True,
-              type=click.Path(exists=True, readable=True, dir_okay=False),
-              help="Trained generator model to predict from")
-@click.option("--testChromPath", "-tcp", required=True,
-              type=click.Path(exists=True, readable=True, file_okay=False),
-              help="Path where test data (bigwig files) resides")
-@click.option("--testChroms", "-tchroms", required=True,
-              type=str,
-              help="Chromosomes for testing. Must be available in all bigwig files")
-@click.option("--outfolder", "-o", required=False,
-              type=click.Path(exists=True, writable=True, file_okay=False),
-              default="./", show_default=True,
-              help="Output path for predicted coolers")
-@click.option("--multiplier", "-mul", required=False,
-             type=click.IntRange(min=1), 
-             default=10, show_default=True)
-@click.option("--binsize", "-b", required=True,
-              type=click.IntRange(min=1000), 
-              help="bin size for binning the chromatin features")
-@click.option("--batchsize", "-bs", required=False,
-              type=click.IntRange(min=1),
-              default=32, show_default=True,
-              help="batchsize for predicting")
-@click.option("--windowsize", "-ws", required=True,
-              type=click.Choice(choices=["64", "128", "256", "512"]),
-              help="windowsize for predicting; must be the same as in trained model. Supported values are 64, 128 and 256")
-@click.command()
-def prediction(trainedmodel, 
-                testchrompath,
-                testchroms,
-                outfolder,
-                multiplier,
-                binsize,
-                batchsize,
-                windowsize
-                ):
-    
+log = logging.getLogger(__name__)
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="Hi-cGAN Prediction")
+    parser.add_argument("--trainedModel", "-trm", required=True,
+                        type=str,
+                        help="Trained generator model to predict from")
+    parser.add_argument("--testChromPath", "-tcp", required=True,
+                        type=str,
+                        help="Path where test data (bigwig files) resides")
+    parser.add_argument("--testChroms", "-tchroms", required=True,
+                        type=str,
+                        help="Chromosomes for testing. Must be available in all bigwig files")
+    parser.add_argument("--outfolder", "-o", required=False,
+                        type=str,
+                        default="./", 
+                        help="Output path for predicted coolers")
+    parser.add_argument("--multiplier", "-mul", required=False,
+                        type=int, 
+                        default=10, 
+                        help="Multiplier for scaling the predicted coolers")
+    parser.add_argument("--binsize", "-b", required=True,
+                        type=int, 
+                        help="Bin size for binning the chromatin features")
+    parser.add_argument("--batchsize", "-bs", required=False,
+                        type=int,
+                        default=32, 
+                        help="Batch size for predicting")
+    parser.add_argument("--windowsize", "-ws", required=True,
+                        type=str,
+                        choices=["64", "128", "256", "512"],
+                        help="Window size for predicting; must be the same as in trained model. Supported values are 64, 128, and 256")
+    return parser.parse_args()
+
+def prediction(args):
+    trainedmodel = args.trainedModel
+    testchrompath = args.testChromPath
+    testchroms = args.testChroms
+    outfolder = args.outfolder
+    multiplier = args.multiplier
+    binsize = args.binsize
+    batchsize = args.batchsize
+    windowsize = args.windowsize
+
     if not os.path.exists(outfolder):
         os.mkdir(outfolder)
     scalefactors = True
@@ -133,5 +142,7 @@ def prediction(trainedmodel,
         if os.path.exists(tfrecordfile):
             os.remove(tfrecordfile)
 
-if __name__ == "__main__":
-    prediction() #pylint: disable=no-value-for-parameter
+
+def main():
+    args = parse_arguments()
+    prediction(args)
