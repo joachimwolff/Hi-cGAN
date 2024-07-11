@@ -4,7 +4,7 @@ import numpy as np
 import os
 import matplotlib.pyplot as plt 
 from tqdm import tqdm
-import utils
+from . import utils
 
 #implementation of adapted pix2pix cGAN
 #modified from tensorflow tutorial https://www.tensorflow.org/tutorials/generative/pix
@@ -421,15 +421,15 @@ class HiCGAN():
         self.generator.save(filepath=os.path.join(self.log_dir, "generator_{:05d}.h5".format(epoch)), save_format="h5")
         self.discriminator.save(filepath=os.path.join(self.log_dir, "discriminator_{:05d}.h5".format(epoch)), save_format="h5")
 
-    def plotModels(self, outputpath: str, figuretype: str):
-        generatorPlotName = "generatorModel.{:s}".format(figuretype)
-        generatorPlotName = os.path.join(outputpath, generatorPlotName)
-        discriminatorPlotName = "discriminatorModel.{:s}".format(figuretype)
-        discriminatorPlotName = os.path.join(outputpath, discriminatorPlotName)
-        generatorEmbeddingPlotName = "generatorEmbeddingModel.{:s}".format(figuretype)
-        generatorEmbeddingPlotName = os.path.join(outputpath, generatorEmbeddingPlotName)
-        discriminatorEmbeddingPlotName = "discriminatorEmbeddingModel.{:s}".format(figuretype)
-        discriminatorEmbeddingPlotName = os.path.join(outputpath, discriminatorEmbeddingPlotName)
+    def plotModels(self, pOutputPath: str, pFigureFileFormat: str):
+        generatorPlotName = "generatorModel.{:s}".format(pFigureFileFormat)
+        generatorPlotName = os.path.join(pOutputPath, generatorPlotName)
+        discriminatorPlotName = "discriminatorModel.{:s}".format(pFigureFileFormat)
+        discriminatorPlotName = os.path.join(pOutputPath, discriminatorPlotName)
+        generatorEmbeddingPlotName = "generatorEmbeddingModel.{:s}".format(pFigureFileFormat)
+        generatorEmbeddingPlotName = os.path.join(pOutputPath, generatorEmbeddingPlotName)
+        discriminatorEmbeddingPlotName = "discriminatorEmbeddingModel.{:s}".format(pFigureFileFormat)
+        discriminatorEmbeddingPlotName = os.path.join(pOutputPath, discriminatorEmbeddingPlotName)
         tf.keras.utils.plot_model(self.generator, show_shapes=True, to_file=generatorPlotName)
         tf.keras.utils.plot_model(self.discriminator, show_shapes=True, to_file=discriminatorPlotName)
         tf.keras.utils.plot_model(self.generator_embedding, show_shapes=True, to_file=generatorEmbeddingPlotName)
@@ -455,7 +455,7 @@ class HiCGAN():
         '''
         try:
             trainedModel = tf.keras.models.load_model(filepath=trainedModelPath, 
-                                                  custom_objects={"CustomReshapeLayer": CustomReshapeLayer(self.input_size)})
+                                                  custom_objects={"CustomReshapeLayer": CustomReshapeLayer(self.input_size)}, safe_mode=False)
             self.generator = trainedModel
         except Exception as e:
             msg = str(e)

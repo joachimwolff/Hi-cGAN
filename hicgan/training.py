@@ -1,14 +1,16 @@
 import csv
 import os
-import click
 import numpy as np
 import tensorflow as tf
-import hicGAN
-import dataContainer
-import records
+import concurrent.futures
 import argparse
-# import tensorflow as tf
 from datetime import datetime
+
+from .lib import hicGAN
+from .lib import dataContainer
+from .lib import records
+
+from hicgan._version import __version__
 
 import logging
 log = logging.getLogger(__name__)
@@ -96,6 +98,8 @@ def parse_arguments(args=None):
                         type=int,
                         default=10,
                         help="Update loss over epoch plots after this number of epochs.")
+    parser.add_argument('--version', action='version',
+                           version='%(prog)s {}'.format(__version__))
 
     return parser
 def create_container(chrom, matrix, chromatinpath):
@@ -164,7 +168,6 @@ def training(trainingMatrices,
 
     #prepare the training data containers. No data is loaded yet.
     traindataContainerList = []
-    import concurrent.futures
 
     
 
@@ -289,7 +292,13 @@ def training(trainingMatrices,
     
     hicGanModel.plotModels(pOutputPath=outputFolder, pFigureFileFormat=figureFileFormat)
 
+    log.info("Starting training at %s" % datetime.now())
     hicGanModel.fit(train_ds=trainDs, epochs=epochs, test_ds=validationDs, steps_per_epoch=steps_per_epoch)
+    log.info("Training finished at %s" % datetime.now())
+    log.info("Cleaning up temporary files...")
+    for tfrecordfile in tfRecordFilenames:
+        if os.path.exists(tfrecordfile):
+            os.remove(tfrecordfile)
 
 def main(args=None):
     args = parse_arguments().parse_args(args)

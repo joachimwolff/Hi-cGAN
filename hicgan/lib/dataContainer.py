@@ -1,10 +1,13 @@
-import utils
-import records
 import os
 import numpy as np
 from tensorflow import dtypes as tfdtypes
 from scipy.sparse import save_npz, csr_matrix
 from tqdm import tqdm
+import concurrent.futures
+
+from . import utils
+from . import records
+
 
 import logging
 log = logging.getLogger(__name__)
@@ -90,7 +93,6 @@ class DataContainer():
         msg = "Loaded {:d} chromatin features from folder {:s}\n"
         msg = msg.format(self.nr_factors, self.chromatinFolder)
         featLoadedMsgList = [] #pretty printing for features loaded
-        import concurrent.futures
 
         def process_bigwig_file(bigwigFile):
             chromname = self.prefixDict_factors[bigwigFile] + self.chromosome
@@ -253,7 +255,6 @@ class DataContainer():
         #write the single files
         folderName = self.chromatinFolder.rstrip("/").replace("/","-")
         recordfiles = [os.path.join(pOutputFolder, "{:s}_{:s}_{:03d}.tfrecord".format(folderName, str(self.chromosome), i + 1)) for i in range(nr_files)]
-        import concurrent.futures
 
         def storeTFRecord(recordfile, firstIndex, lastIndex, outfolder):
             log.debug("Prepare dict...")
@@ -414,7 +415,6 @@ class DataContainer():
         if not self.data_loaded:
             msg = "Error: no data loaded, nothing to prepare"
             raise RuntimeError(msg)
-        import concurrent.futures
 
         def get_sample_data(idx):
             return self.getSampleData(idx=idx)
@@ -426,7 +426,6 @@ class DataContainer():
         if len(data) < 1:
             msg = "Error: No data to write"
             raise RuntimeError(msg)
-        import concurrent.futures
 
         for key in data[0]:
             featData = [feature[key] for feature in data]
