@@ -1,7 +1,9 @@
 import argparse
 from utils import computePearsonCorrelation
 
-def main():
+from hicgan._version import __version__
+
+def parse_arguments(args=None):
     parser = argparse.ArgumentParser(description='Compute Correlation')
     parser.add_argument('--coolfile1', type=str, help='Path to cool file 1')
     parser.add_argument('--coolfile2', type=str, help='Path to cool file 2')
@@ -13,8 +15,12 @@ def main():
     parser.add_argument('--target-chromosome', type=str, help='List of chromosomes for the target')
     parser.add_argument('--model-cell-lines',  type=str, help='List of cell lines for the model')
     parser.add_argument('--target-cell-lines',  type=str, help='List of cell lines for the target')
+    parser.add_argument('--version', action='version', version='%(prog)s {}'.format(__version__))
+    return parser.parse_args()
 
-    args = parser.parse_args()
+def main():
+   
+    args = parse_arguments()
 
     # Access the arguments
     coolfile1 = args.coolfile1
@@ -29,12 +35,7 @@ def main():
     target_cell_lines = args.target_cell_lines
 
     computePearsonCorrelation(coolfile1, coolfile2, windowSize, 
-                              
                                 model_chromosomes, target_chromosome, 
                                 model_cell_lines, target_cell_lines,
                                 outputname_plot, outputname_csv)
-    # Your code logic here
-    # ...
-
-if __name__ == '__main__':
-    main()
+  
