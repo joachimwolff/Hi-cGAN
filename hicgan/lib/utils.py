@@ -110,11 +110,16 @@ def scaleArray(pArray):
     Returns:
     array scaled to value range [0..1]
     ''' 
+    log.debug("pArray: %s", pArray)
     if pArray is None or pArray.size == 0:
         msg = "cannot normalize empty array"
         print(msg)
         return pArray
-    if pArray.max() - pArray.min() != 0:
+    if isinstance(pArray, sparse.csr_matrix):
+        if pArray.max() - pArray.min() != 0:
+            normArray = pArray
+            normArray.data = (pArray.data - pArray.min()) / (pArray.max() - pArray.min())
+    elif pArray.max() - pArray.min() != 0:
         normArray = (pArray - pArray.min()) / (pArray.max() - pArray.min())
     elif pArray.max() > 0: #min = max >0
         normArray = pArray / pArray.max()

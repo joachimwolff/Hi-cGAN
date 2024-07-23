@@ -25,6 +25,7 @@ def parse_arguments(args=None):
                         help="mcooler matrices for training.")
     parser.add_argument("--trainingChromosomes", "-tchroms", required=True,
                         type=str,
+                        nargs='+',
                         help="Train chromosomes. Must be present in all train matrices.")
     parser.add_argument("--trainingChromosomesFolders", "-tcp", required=True,
                         type=str, nargs='+',
@@ -34,12 +35,13 @@ def parse_arguments(args=None):
                         help="Cooler matrices for validation.")
     parser.add_argument("--validationChromosomes", "-vchroms", required=True,
                         type=str,
+                        nargs='+',
                         help="Validation chromosomes. Must be present in all validation matrices.")
     parser.add_argument("--validationChromosomesFolders", "-vcp", required=True,
                         type=str, nargs='+',
                         help="Path where chromatin factors for validation reside (bigwig files).")
     parser.add_argument("--windowSize", "-ws", required=True,
-                        type=int, choices=[64, 128, 256, 512],
+                        type=int, choices=[16, 32,64, 128, 256, 512],
                         help="window size for submatrices.")
     parser.add_argument("--outputFolder", "-o", required=True,
                         type=str,
@@ -139,13 +141,13 @@ def training(trainingMatrices,
     #remove spaces, commas and "chr" from the train and val chromosome lists
     #ensure each chrom name is used only once, but allow the same chrom for train and validation
     #sort the lists and write to param dict
-    trainChromNameList = trainingChromosomes.replace(",","")
-    trainChromNameList = trainChromNameList.rstrip().split(" ")  
+    trainChromNameList = trainingChromosomes
+    # trainChromNameList = trainChromNameList.rstrip().split(" ")  
     trainChromNameList = [x.lstrip("chr") for x in trainChromNameList]
     trainChromNameList = sorted(list(set(trainChromNameList)))
     paramDict["trainChromNameList"] = trainChromNameList
-    valChromNameList = validationChromosomes.replace(",","")
-    valChromNameList = valChromNameList.rstrip().split(" ")
+    valChromNameList = validationChromosomes
+    # valChromNameList = valChromNameList.rstrip().split(" ")
     valChromNameList = [x.lstrip("chr") for x in valChromNameList]
     valChromNameList = sorted(list(set(valChromNameList)))
     paramDict["valChromNameList"] = valChromNameList
@@ -306,45 +308,62 @@ def main(args=None):
 
     
     for matrix in args.trainingMatrices + args.validationMatrices:
-        if not os.path.exists(matrix):
-            msg = "Exiting. Matrix file not found: {:s}".format(matrix)
-            print(msg)
-            return
-        if not matrix.endswith(".mcool"):
-            msg = "Exiting. Only .mcool matrices are supported: {:s}".format(matrix)
-            print(msg)
-            return
-        if not cooler.fileops.is_multires_file(matrix):
+        if not (cooler.fileops.is_cooler(matrix) or cooler.fileops.is_multires_file(matrix) or os.path.exists(matrix) or matrix.endswith(".mcool")):
             msg = "Exiting. Invalid cooler file: {:s}".format(matrix)
             print(msg)
             return
+        # if not cooler.fileops.is_multires_file(matrix):
+        #     msg = "Exiting. Invalid cooler file: {:s}".format(matrix)
+        #     print(msg)
+        #     return
+        # if not os.path.exists(matrix):
+        #     msg = "Exiting. Matrix file not found: {:s}".format(matrix)
+        #     print(msg)
+        #     return
+        # if not matrix.endswith(".mcool"):
+        #     msg = "Exiting. Only .mcool matrices are supported: {:s}".format(matrix)
+        #     print(msg)
+        #     return
+        
             
-    
-    submatrices = cooler.fileops.list_coolers(args.trainingChromosomesFolders[0])
+    if cooler.fileops.is_multires_file(args.trainingMatrices[0]):
+        submatrices = cooler.fileops.list_coolers(args.trainingMatrices[0])
 
-    matrix_resolutions_training = [[]] * len(submatrices)
-    matrix_resolutions_validation = [[]] * len(submatrices)
+        matrix_resolutions_training = [[] for _ in range(len(submatrices))]
+        matrix_resolutions_validation = [[] for _ in range(len(submatrices))]
 
-    for matrix in args.trainingChromosomesFolders:
-        for i, submatrix in enumerate(submatrices):
-            if not cooler.fileops.is_cooler(matrix + "::" + submatrix):
-                msg = "Exiting. Invalid cooler file: {:s}. All matrices need to have the same resolutions.".format(matrix)
-                print(msg)
-                return
-            matrix_resolutions_training[i].append(matrix + "::" + submatrix)
-    for matrix in args.validationChromosomesFolders:
-        for i, submatrix in enumerate(submatrices):
-            if not cooler.fileops.is_cooler(matrix + "::" + submatrix):
-                msg = "Exiting. Invalid cooler file: {:s}. All matrices need to have the same resolutions.".format(matrix)
-                print(msg)
-                return
-            matrix_resolutions_validation[i].append(matrix + "::" + submatrix)
-    
-    for i, (training_matrices, validation_matrices) in enumerate(zip(matrix_resolutions_training, matrix_resolutions_validation)):
+        # chromatine_paths_training = [args.trainingChromosomesFolders] * len(submatrices)
+        # chromatine_paths_validation = [args.validationChromosomesFolders] * len(submatrices)
+        log.debug("args.trainingMatrices: %s" % args.trainingMatrices)
+        for matrix in args.trainingMatrices:
+            for i, submatrix in enumerate(submatrices):
+                if not cooler.fileops.is_cooler(matrix + "::" + submatrix):
+                    msg = "Exiting. Invalid cooler file: {:s}. All matrices need to have the same resolutions.".format(matrix)
+                    print(msg)
+                    return
+                # log.debug("i: %s" % i)
+                # log.debug("submatrix: %s" % submatrix)
+                # log.debug("matrix: %s" % matrix)
+                matrix_resolutions_training[i].append(matrix + "::" + submatrix)
+                # log.debug("matrix_resolutions_training: %s" % matrix_resolutions_training)
+        for matrix in args.validationMatrices:
+            for i, submatrix in enumerate(submatrices):
+                if not cooler.fileops.is_cooler(matrix + "::" + submatrix):
+                    msg = "Exiting. Invalid cooler file: {:s}. All matrices need to have the same resolutions.".format(matrix)
+                    print(msg)
+                    return
+                matrix_resolutions_validation[i].append(matrix + "::" + submatrix)
+        
+        log.debug("Submatrices: %s" % submatrices)
+        log.debug("Training matrices: %s" % matrix_resolutions_training)
+        log.debug("Validation matrices: %s" % matrix_resolutions_validation)
+    else:
+        matrix_resolutions_training = [args.trainingMatrices]
+        matrix_resolutions_validation = [args.validationMatrices]
+        submatrices = ["single"]
+    for submatrix, training_matrices, validation_matrices in zip(submatrices, matrix_resolutions_training, matrix_resolutions_validation):
 
         strategy = tf.distribute.MirroredStrategy()
-
-
 
         with strategy.scope() as scope: 
             training(
@@ -355,7 +374,7 @@ def main(args=None):
                 validationChromosomes=args.validationChromosomes,
                 validationChromosomesFolders=args.validationChromosomesFolders,
                 windowSize=args.windowSize,
-                outputFolder=os.path.join(args.outputFolder, str(i)),
+                outputFolder=os.path.join(args.outputFolder, submatrix.split('/')[-1]),
                 epochs=args.epochs,
                 batchSize=args.batchSize,
                 lossWeightPixel=args.lossWeightPixel,
@@ -375,9 +394,9 @@ def main(args=None):
 
     
     with h5py.File(os.path.join(args.outputFolder, 'trainedModel.hdf'), 'w') as hdf5_file:
-        for i in range(len(matrix_resolutions_training)):
-            file_name = os.path.basename(os.path.join(args.outputFolder, str(i), "generator_final.keras"))
+        for submatrix in submatrices:
+            file_name = os.path.join(args.outputFolder, submatrix.split('/')[-1], "generator_final.keras")
             with open(file_name, 'rb') as f:
                 file_data = f.read()
                 # Store the file data in the HDF5 file
-                hdf5_file.create_dataset(str(i) + '.keras', data=file_data)
+                hdf5_file.create_dataset(submatrix.split('/')[-1] + '.keras', data=file_data)
