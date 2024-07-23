@@ -22,6 +22,7 @@ def parse_arguments():
                         help="Path where test data (bigwig files) resides")
     parser.add_argument("--predictionChromosomes", "-pc", required=True,
                         type=str,
+                        nargs='+',
                         help="Chromosomes the Hi-C matrix should be predicted. Must be available in all bigwig files")
     parser.add_argument("--matrixOutputName", "-mn", required=False,
                         type=str,
@@ -40,7 +41,7 @@ def parse_arguments():
                         default=10, 
                         help="Multiplier for scaling the predicted coolers")
     parser.add_argument("--binSize", "-b", required=True,
-                        type=int, 
+                        type=int,
                         help="Bin size for binning the chromatin features")
     parser.add_argument("--batchSize", "-bs", required=False,
                         type=int,
@@ -64,8 +65,8 @@ def prediction(args):
     batchSize = args.batchSize
     windowSize = args.windowSize
 
-    if not os.path.exists(outputFolder):
-        os.mkdir(outputFolder)
+    os.makedirs(outputFolder, exist_ok=True)
+
     scalefactors = True
     clampfactors = False
     scalematrix = True
@@ -76,7 +77,7 @@ def prediction(args):
     paramDict = locals().copy()
         
     #extract chromosome names from the input
-    chromNameList = predictionChromosomes.replace(",", " ").rstrip().split(" ")  
+    chromNameList = predictionChromosomes#.replace(",", " ").rstrip().split(" ")  
     chromNameList = sorted([x.lstrip("chr") for x in chromNameList])
     
     containerCls = dataContainer.DataContainer

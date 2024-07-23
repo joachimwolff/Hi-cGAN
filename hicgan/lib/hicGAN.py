@@ -21,11 +21,10 @@ class HiCGAN():
                     loss_type_pixel: str = "L1", #type of per-pixel error (L1, L2)
                     input_size: int = 256,
                     plot_frequency: int = 20,
-                    plot_type: str = "png",
+                    plot_type: str = "pdf",
                     learning_rate_generator: float = 2e-5,
                     learning_rate_discriminator: float = 1e-6,
                     adam_beta_1: float = 0.5,
-                    pretrained_model_path: str = "",
                     scope=None): 
         super().__init__()
 
@@ -398,8 +397,8 @@ class HiCGAN():
                                     discLossTrain_True=self.__disc_train_loss_true_batches,
                                     discLossTrain_Fake=self.__disc_train_loss_fake_batches, 
                                     discLossVal=self.__disc_val_loss_batches)
-                self.generator.save(filepath=os.path.join(self.log_dir, "generator_{:05d}.h5".format(epoch)), save_format="h5")
-                self.discriminator.save(filepath=os.path.join(self.log_dir, "discriminator_{:05d}.h5".format(epoch)), save_format="h5")
+                self.generator.save(filepath=os.path.join(self.log_dir, "generator_{:05d}.keras".format(epoch)), save_format="keras")
+                self.discriminator.save(filepath=os.path.join(self.log_dir, "discriminator_{:05d}.keras".format(epoch)), save_format="keras")
 
 
         self.checkpoint.save(file_prefix = self.checkpoint_prefix)
@@ -412,14 +411,16 @@ class HiCGAN():
                               pDiscLossNameList=["train total", "train real", "train gen.", "valid. total"],
                               pFilename=self.progress_plot_name,
                               useLogscaleList=[True, False])
-        np.savez(os.path.join(self.log_dir, "lossValues_{:05d}.npz".format(epoch)), 
+        np.savez(os.path.join(self.log_dir, "lossValues_final.npz".format(epoch)), 
                                     genLossTrain=self.__gen_train_loss_batches, 
                                     genLossVal=self.__gen_val_loss_batches, 
                                     discLossTrain_True=self.__disc_train_loss_true_batches,
                                     discLossTrain_Fake=self.__disc_train_loss_fake_batches, 
                                     discLossVal=self.__disc_val_loss_batches)
-        self.generator.save(filepath=os.path.join(self.log_dir, "generator_{:05d}.h5".format(epoch)), save_format="h5")
-        self.discriminator.save(filepath=os.path.join(self.log_dir, "discriminator_{:05d}.h5".format(epoch)), save_format="h5")
+        self.generator.save(filepath=os.path.join(self.log_dir, "generator_final.keras"), save_format="keras")
+        self.discriminator.save(filepath=os.path.join(self.log_dir, "discriminator_final.keras"), save_format="keras")
+
+        
 
     def plotModels(self, pOutputPath: str, pFigureFileFormat: str):
         generatorPlotName = "generatorModel.{:s}".format(pFigureFileFormat)
