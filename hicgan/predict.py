@@ -9,15 +9,18 @@ from .lib import hicGAN
 from .lib import utils
 import logging
 from hicgan._version import __version__
-
+import tarfile
+import gzip
+import tempfile
+import io
 log = logging.getLogger(__name__)
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Hi-cGAN Prediction")
-    parser.add_argument("--trainedModel", "-trm", required=True,
+    parser.add_argument("--trainedModel", "-tm", required=True,
                         type=str,
                         help="Trained generator model to predict from")
-    parser.add_argument("--predictionChromosomesFolders", "-tcp", required=True,
+    parser.add_argument("--predictionChromosomesFolders", "-pcf", required=True,
                         type=str,
                         help="Path where test data (bigwig files) resides")
     parser.add_argument("--predictionChromosomes", "-pc", required=True,
@@ -38,11 +41,11 @@ def parse_arguments():
                         help="Output path for predicted cool-file")
     parser.add_argument("--multiplier", "-mul", required=False,
                         type=int, 
-                        default=10, 
+                        default=1000, 
                         help="Multiplier for scaling the predicted coolers")
-    parser.add_argument("--binSize", "-b", required=True,
-                        type=int,
-                        help="Bin size for binning the chromatin features")
+    # parser.add_argument("--binSize", "-b", required=True,
+    #                     type=int,
+    #                     help="Bin size for binning the chromatin features")
     parser.add_argument("--batchSize", "-bs", required=False,
                         type=int,
                         default=32, 
@@ -55,15 +58,8 @@ def parse_arguments():
                            version='%(prog)s {}'.format(__version__))
     return parser.parse_args()
 
-def prediction(args):
-    trainedmodel = args.trainedModel
-    predictionChromosomesFolders = args.predictionChromosomesFolders
-    predictionChromosomes = args.predictionChromosomes
-    outputFolder = args.outputFolder
-    multiplier = args.multiplier
-    binSize = args.binSize
-    batchSize = args.batchSize
-    windowSize = args.windowSize
+def prediction(trainedmodel, predictionChromosomesFolders, predictionChromosomes, outputFolder, multiplier, binSize, batchSize, windowSize, matrixOutputName, parameterOutputFile):
+    
 
     os.makedirs(outputFolder, exist_ok=True)
 
@@ -137,7 +133,7 @@ def prediction(args):
     predList = [utils.rebuildMatrix(pArrayOfTriangles=x, pWindowSize=windowSize, pFlankingSize=windowSize) for x in predList]
     predList = [utils.scaleArray(x) * multiplier for x in predList]
 
-    matrixname = os.path.join(outputFolder, args.matrixOutputName)
+    matrixname = os.path.join(outputFolder, matrixOutputName)
     log.info("Writing predicted matrix to disk on %s..." % matrixname)   
 
     utils.writeCooler(pMatrixList=predList, 
@@ -145,7 +141,7 @@ def prediction(args):
                       pOutfile=matrixname, 
                       pChromosomeList=chromNameList)
 
-    parameterFile = os.path.join(outputFolder, args.parameterOutputFile) 
+    parameterFile = os.path.join(outputFolder, parameterOutputFile) 
     with open(parameterFile, "w") as csvfile:
         dictWriter = csv.DictWriter(csvfile, fieldnames=sorted(list(paramDict.keys())))
         dictWriter.writeheader()
@@ -157,6 +153,60 @@ def prediction(args):
             os.remove(tfrecordfile)
 
 
+def extract_specific_file_to_temp_dir(tar_gz_path, file_to_extract):
+    # Create a temporary directory
+    temp_dir = tempfile.TemporaryDirectory()
+    
+    with tarfile.open(tar_gz_path, "r:gz") as tar:
+        # Check if the file exists in the archive
+        if file_to_extract in tar.getnames():
+            # Extract the specific file to the temporary directory
+            tar.extract(file_to_extract, path=temp_dir.name)
+            extracted_file_path = os.path.join(temp_dir.name, file_to_extract)
+            return extracted_file_path, temp_dir
+        else:
+            print(f"{file_to_extract} not found in the archive")
+            temp_dir.cleanup()
+            return None, None
+
+def list_files_in_tar_gz(tar_gz_path):
+    with tarfile.open(tar_gz_path, "r:gz") as tar:
+        file_names = tar.getnames()
+    return file_names
+
 def main():
     args = parse_arguments()
-    prediction(args)
+
+    predictionChromosomesFolders = args.predictionChromosomesFolders
+    predictionChromosomes = args.predictionChromosomes
+    outputFolder = args.outputFolder
+    multiplier = args.multiplier
+    # binSize = args.binSize
+    batchSize = args.batchSize
+    windowSize = args.windowSize
+    matrixOutputName = args.matrixOutputName
+    parameterOutputFile = args.parameterOutputFile
+   
+    
+    generator_files = list_files_in_tar_gz(args.trainedModel)
+    log.debug(f"Generator files: {generator_files}")
+    
+        # Iterate through each model directory and load the model
+    for generator in generator_files:
+        
+        extracted_file_path, temp_dir = extract_specific_file_to_temp_dir(args.trainedModel, generator)
+
+        # extracted_file_path = extract_specific_file(args.trainedModel, generator, extract_path)
+
+        # args.outputFolder = os.path.join(args.outputFolder, os.path.basename(model_dir))
+        log.debug(f"Predicting with model in {extracted_file_path}")
+        log.debug(f"Output folder: {args.outputFolder}")
+        binSize = int(os.path.basename(generator).split(".")[0])
+        log.debug(f"Bin size: {binSize}")
+        prediction(
+            extracted_file_path, predictionChromosomesFolders, predictionChromosomes, outputFolder, 
+            multiplier, binSize, batchSize, windowSize, str(binSize) + "_" + matrixOutputName, parameterOutputFile
+        )
+        temp_dir.cleanup()
+
+  

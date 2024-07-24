@@ -36,13 +36,16 @@ def getChromSizesFromBigwig(pBigwigFileName):
         print(e) 
     return chromSizeDict
          
-def getMatrixFromCooler(pCoolerFilePath, pChromNameStr):
+def getMatrixFromCooler(pCoolerFilePath, pChromName):
     #returns sparse csr matrix from cooler file for given chromosome name
     sparseMatrix = None
     binSizeInt = 0
     try:
         coolerMatrix = cooler.Cooler(pCoolerFilePath)
-        sparseMatrix = coolerMatrix.matrix(sparse=True,balance=False).fetch(pChromNameStr)
+        if isinstance(pChromName, str):
+            sparseMatrix = coolerMatrix.matrix(sparse=True,balance=False).fetch(pChromName)
+        else:
+            sparseMatrix = coolerMatrix.matrix(balance=False, sparse=True, join=True).fetch(pChromName[0], pChromName[1])
         sparseMatrix = sparseMatrix.tocsr() #so it can be sliced later
         binSizeInt = int(coolerMatrix.binsize)
     except Exception as e:
@@ -71,33 +74,43 @@ def binChromatinFactor(pBigwigFileName, pBinSizeInt, pChromStr, pChromSize=None)
     except Exception as e:
         print(e)
     if properFileType:
-        chrom = pChromStr
-        if chrom not in bigwigFile.chroms():
-            msg = "Chromosome {:s} not present in bigwigfile {:s}"
-            msg = msg.format(chrom, pBigwigFileName)
-            raise SystemExit(msg)
-        #compute signal values (stats) over resolution-sized bins
-        if pChromSize is None:
-            chromsize = bigwigFile.chroms(chrom)
+        if not isinstance(pChromStr, list):
+            chromosome_list = [pChromStr]
         else:
-            chromsize = pChromSize
-        chromStartList = list(range(0,chromsize,pBinSizeInt))
-        chromEndList = list(range(pBinSizeInt,chromsize,pBinSizeInt))
-        chromEndList.append(chromsize)
-        mergeType = 'mean'
-        binArray = np.array(bigwigFile.stats(chrom, 0, chromsize, nBins=len(chromStartList), type=mergeType)).astype("float32")
-        nr_nan = np.count_nonzero(np.isnan(binArray))
-        nr_inf = np.count_nonzero(np.isinf(binArray))
-        if nr_inf != 0 or nr_nan != 0:
-            binArray = np.nan_to_num(binArray, nan=0.0, posinf=np.nanmax(binArray[binArray != np.inf]),neginf=0.0)
-        if nr_inf != 0:
-            msg_inf = "Warning: replaced {:d} infinity values in {:s} by 0/max. numeric value in data"
-            msg_inf = msg_inf.format(nr_inf, pBigwigFileName)
-            print(msg_inf)
-        if nr_nan != 0:
-            msg_nan = "Warning: replaced {:d} NANs in {:s} by 0."
-            msg_nan = msg_nan.format(nr_nan, pBigwigFileName)
-            print(msg_nan)
+            chromosome_list = pChromStr
+
+        for chromosome in chromosome_list:
+            if chromosome not in bigwigFile.chroms():
+                msg = "Chromosome {:s} not present in bigwigfile {:s}"
+                msg = msg.format(chromosome, pBigwigFileName)
+                raise SystemExit(msg)
+            #compute signal values (stats) over resolution-sized bins
+            # if pChromSize is None:
+            chromsize = bigwigFile.chroms(chromosome)
+            # else:
+            #     chromsize = pChromSize
+            chromStartList = list(range(0,chromsize,pBinSizeInt))
+            chromEndList = list(range(pBinSizeInt,chromsize,pBinSizeInt))
+            chromEndList.append(chromsize)
+            mergeType = 'mean'
+            tmpBinArray = np.array(bigwigFile.stats(chromosome, 0, chromsize, nBins=len(chromStartList), type=mergeType)).astype("float32")
+            nr_nan = np.count_nonzero(np.isnan(tmpBinArray))
+            nr_inf = np.count_nonzero(np.isinf(tmpBinArray))
+            if nr_inf != 0 or nr_nan != 0:
+                tmpBinArray = np.nan_to_num(tmpBinArray, nan=0.0, posinf=np.nanmax(tmpBinArray[tmpBinArray != np.inf]),neginf=0.0)
+            if nr_inf != 0:
+                msg_inf = "Warning: replaced {:d} infinity values in {:s} by 0/max. numeric value in data"
+                msg_inf = msg_inf.format(nr_inf, pBigwigFileName)
+                print(msg_inf)
+            if nr_nan != 0:
+                msg_nan = "Warning: replaced {:d} NANs in {:s} by 0."
+                msg_nan = msg_nan.format(nr_nan, pBigwigFileName)
+                print(msg_nan)
+
+            if binArray is None:
+                binArray = tmpBinArray
+            else:
+                binArray = np.concatenate((binArray,tmpBinArray), axis=0)
     return binArray
 
 def scaleArray(pArray):
@@ -119,6 +132,7 @@ def scaleArray(pArray):
         if pArray.max() - pArray.min() != 0:
             normArray = pArray
             normArray.data = (pArray.data - pArray.min()) / (pArray.max() - pArray.min())
+            normArray.eliminate_zeros()
     elif pArray.max() - pArray.min() != 0:
         normArray = (pArray - pArray.min()) / (pArray.max() - pArray.min())
     elif pArray.max() > 0: #min = max >0

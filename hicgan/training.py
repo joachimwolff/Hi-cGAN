@@ -6,7 +6,8 @@ import concurrent.futures
 import argparse
 from datetime import datetime
 import cooler
-import h5py
+import tarfile
+import gzip
 
 from .lib import hicGAN
 from .lib import dataContainer
@@ -87,6 +88,9 @@ def parse_arguments(args=None):
     parser.add_argument("--flipSamples", "-fs", required=False,
                         action='store_true',
                         help="Flip training matrices and chromatin features (data augmentation).")
+    parser.add_argument("--interChromosomalTraining", "-ict", required=False,
+                        action='store_true',
+                        help="Train additional on inter-chromosomal data.")
     parser.add_argument("--figureFileFormat", "-ft", required=False,
                         type=str, choices=["png", "pdf", "svg"],
                         default="png",
@@ -95,6 +99,10 @@ def parse_arguments(args=None):
                         type=int,
                         default=2000,
                         help="Approx. size (number of samples) of the tfRecords used in the data pipeline for training.")
+    parser.add_argument("--smallestResolution", "-sr", required=False,
+                        type=int,
+                        default=100000,
+                        help="Smallest resolution of the matrices for training and validation. Smaller resolutions might cause issues with large window sizes.")
     parser.add_argument("--plotFrequency", "-pfreq", required=False,
                         type=int,
                         default=10,
@@ -130,8 +138,11 @@ def training(trainingMatrices,
              flipSamples,
              figureFileFormat,
              recordSize,
-             plotFrequency, scope=None):
+             plotFrequency, 
+             interChoromosomalTraining,
+             scope=None):
 
+    interChoromosomalTraining = False
     os.makedirs(outputFolder, exist_ok=True)
     #few constants
     # windowSize = int(windowSize)
@@ -152,6 +163,7 @@ def training(trainingMatrices,
     valChromNameList = sorted(list(set(valChromNameList)))
     paramDict["valChromNameList"] = valChromNameList
 
+   
     #ensure there are as many matrices as chromatin paths
     if len(trainingMatrices) != len(trainingChromosomesFolders):
         msg = "Number of train matrices and chromatin paths must match\n"
@@ -166,23 +178,42 @@ def training(trainingMatrices,
 
     #prepare the training data containers. No data is loaded yet.
     traindataContainerList = []
-
-    
-
-    with concurrent.futures.ProcessPoolExecutor() as executor:
-        for chrom in trainChromNameList:
-            for matrix, chromatinpath in zip(trainingMatrices, trainingChromosomesFolders):
-                future = executor.submit(create_container, chrom, matrix, chromatinpath)
-                traindataContainerList.append(future.result())
-
-    #prepare the validation data containers. No data is loaded yet.
     valdataContainerList = []
 
-    with concurrent.futures.ProcessPoolExecutor() as executor:
-        for chrom in valChromNameList:
-            for matrix, chromatinpath in zip(validationMatrices, validationChromosomesFolders):
-                future = executor.submit(create_container, chrom, matrix, chromatinpath)
-                valdataContainerList.append(future.result())
+    
+    if interChoromosomalTraining:
+        #inter-chromosomal training
+        #create a container for each chromosome pair
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            for chrom1 in trainChromNameList:
+                for chrom2 in trainChromNameList:
+                    if chrom1 == chrom2:
+                        continue
+                    for matrix, chromatinpath in zip(trainingMatrices, trainingChromosomesFolders):
+                        future = executor.submit(create_container, [chrom1, chrom2], matrix, chromatinpath)
+                        traindataContainerList.append(future.result())
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            for chrom1 in valChromNameList:
+                for chrom2 in valChromNameList:
+                    if chrom1 == chrom2:
+                        continue
+                    for matrix, chromatinpath in zip(validationMatrices, validationChromosomesFolders):
+                        future = executor.submit(create_container, [chrom1, chrom2], matrix, chromatinpath)
+                        valdataContainerList.append(future.result())
+    else:
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            for chrom in trainChromNameList:
+                for matrix, chromatinpath in zip(trainingMatrices, trainingChromosomesFolders):
+                    future = executor.submit(create_container, chrom, matrix, chromatinpath)
+                    traindataContainerList.append(future.result())
+
+        #prepare the validation data containers. No data is loaded yet.
+
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            for chrom in valChromNameList:
+                for matrix, chromatinpath in zip(validationMatrices, validationChromosomesFolders):
+                    future = executor.submit(create_container, chrom, matrix, chromatinpath)
+                    valdataContainerList.append(future.result())
 
     #define the load params for the containers
     loadParams = {"scaleFeatures": True,
@@ -328,7 +359,7 @@ def main(args=None):
             
     if cooler.fileops.is_multires_file(args.trainingMatrices[0]):
         submatrices = cooler.fileops.list_coolers(args.trainingMatrices[0])
-
+        submatrices_write_out = []
         matrix_resolutions_training = [[] for _ in range(len(submatrices))]
         matrix_resolutions_validation = [[] for _ in range(len(submatrices))]
 
@@ -341,19 +372,26 @@ def main(args=None):
                     msg = "Exiting. Invalid cooler file: {:s}. All matrices need to have the same resolutions.".format(matrix)
                     print(msg)
                     return
-                # log.debug("i: %s" % i)
-                # log.debug("submatrix: %s" % submatrix)
-                # log.debug("matrix: %s" % matrix)
-                matrix_resolutions_training[i].append(matrix + "::" + submatrix)
-                # log.debug("matrix_resolutions_training: %s" % matrix_resolutions_training)
+                cooler_file = cooler.Cooler(matrix + "::" + submatrix)
+                resolution = cooler_file.info['bin-size']
+                if resolution <= args.smallestResolution:
+                    matrix_resolutions_training[i].append(matrix + "::" + submatrix)
+                    submatrices_write_out.append(submatrix)
+
         for matrix in args.validationMatrices:
             for i, submatrix in enumerate(submatrices):
                 if not cooler.fileops.is_cooler(matrix + "::" + submatrix):
                     msg = "Exiting. Invalid cooler file: {:s}. All matrices need to have the same resolutions.".format(matrix)
                     print(msg)
                     return
-                matrix_resolutions_validation[i].append(matrix + "::" + submatrix)
-        
+                cooler_file = cooler.Cooler(matrix + "::" + submatrix)
+                resolution = cooler_file.info['bin-size']
+                if resolution <= args.smallestResolution:
+                    matrix_resolutions_validation[i].append(matrix + "::" + submatrix)
+                    # submatrices_write_out.append(submatrix)
+        matrix_resolutions_training = [sublist for sublist in matrix_resolutions_training if sublist]
+        matrix_resolutions_validation = [sublist for sublist in matrix_resolutions_validation if sublist]
+
         log.debug("Submatrices: %s" % submatrices)
         log.debug("Training matrices: %s" % matrix_resolutions_training)
         log.debug("Validation matrices: %s" % matrix_resolutions_validation)
@@ -389,14 +427,19 @@ def main(args=None):
                 figureFileFormat=args.figureFileFormat,
                 recordSize=args.recordSize,
                 plotFrequency=args.plotFrequency,
+                interChoromosomalTraining=args.interChromosomalTraining,
                 scope=scope
             )  # pylint: disable=no-value-for-parameter
 
-    
-    with h5py.File(os.path.join(args.outputFolder, 'trainedModel.hdf'), 'w') as hdf5_file:
-        for submatrix in submatrices:
+    with tarfile.open(os.path.join(args.outputFolder, 'trainedModel.tar.gz'), "w:gz") as tar:
+        for submatrix in submatrices_write_out:
             file_name = os.path.join(args.outputFolder, submatrix.split('/')[-1], "generator_final.keras")
-            with open(file_name, 'rb') as f:
-                file_data = f.read()
-                # Store the file data in the HDF5 file
-                hdf5_file.create_dataset(submatrix.split('/')[-1] + '.keras', data=file_data)
+            tar.add(file_name, arcname=submatrix.split('/')[-1] + '.keras')
+    
+    # with h5py.File(os.path.join(args.outputFolder, 'trainedModel.hdf'), 'w') as hdf5_file:
+    #     for submatrix in submatrices:
+    #         file_name = os.path.join(args.outputFolder, submatrix.split('/')[-1], "generator_final.keras")
+    #         with open(file_name, 'rb') as f:
+    #             file_data = f.read()
+    #             # Store the file data in the HDF5 file
+    #             hdf5_file.create_dataset(submatrix.split('/')[-1] + '.keras', data=file_data)

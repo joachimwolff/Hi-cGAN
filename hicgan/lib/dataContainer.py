@@ -15,7 +15,8 @@ log = logging.getLogger(__name__)
 
 class DataContainer():
     def __init__(self, chromosome, matrixFilePath, chromatinFolder, binSize=None):
-        self.chromosome = str(chromosome)
+        
+        self.chromosome = chromosome
         self.matrixFilePath = matrixFilePath
         self.chromatinFolder = chromatinFolder
         self.FactorDataArray = None
@@ -61,8 +62,13 @@ class DataContainer():
         for bigwigFile in bigwigFileList:
             try:
                 prefixDict_factors[bigwigFile] = utils.getChromPrefixBigwig(bigwigFile)
-                chromname = prefixDict_factors[bigwigFile] + self.chromosome
-                chromSizeList.append( utils.getChromSizesFromBigwig(bigwigFile)[chromname] )
+                if isinstance(self.chromosome, list):
+                    chromname = [prefixDict_factors[bigwigFile] + chrom for chrom in self.chromosome]
+                    chromsize_bigwig = sum(utils.getChromSizesFromBigwig(bigwigFile)[chrom] for chrom in chromname)
+                    chromSizeList.append(chromsize_bigwig)
+                else:
+                    chromname = prefixDict_factors[bigwigFile] + self.chromosome
+                    chromSizeList.append( utils.getChromSizesFromBigwig(bigwigFile)[chromname] )
             except Exception as e:
                 msg = str(e) + "\n"
                 msg += "Could not load data from bigwigfile {}".format(bigwigFile) 
@@ -89,17 +95,24 @@ class DataContainer():
         self.prefixDict_factors = prefixDict_factors
         self.chromSize_factors = chromSize_factors
         nr_bins = int( np.ceil(self.chromSize_factors / self.binSize) )
+        log.debug("nr_bins: {}".format(nr_bins))
+
         self.FactorDataArray = np.empty(shape=(len(bigwigFileList),nr_bins))
         msg = "Loaded {:d} chromatin features from folder {:s}\n"
         msg = msg.format(self.nr_factors, self.chromatinFolder)
         featLoadedMsgList = [] #pretty printing for features loaded
 
         def process_bigwig_file(bigwigFile):
-            chromname = self.prefixDict_factors[bigwigFile] + self.chromosome
+            if isinstance(self.chromosome, list):
+                chromname = [self.prefixDict_factors[bigwigFile] + chrom for chrom in self.chromosome]
+            else:
+                chromname = self.prefixDict_factors[bigwigFile] + self.chromosome
+            # log.debug("Chromosome size: {:d}".format(self.chromSize_factors))
             tmpArray = utils.binChromatinFactor(pBigwigFileName=bigwigFile,
                                                 pBinSizeInt=self.binSize,
                                                 pChromStr=chromname,
                                                 pChromSize=self.chromSize_factors)
+            # log.debug('Size of tmpArray: {}'.format(tmpArray.shape))
             if clampFeatures:
                 tmpArray = utils.clampArray(tmpArray)
             if scaleFeatures:
@@ -110,7 +123,11 @@ class DataContainer():
             futures = [executor.submit(process_bigwig_file, bigwigFile) for bigwigFile in bigwigFileList]
             for i, future in enumerate(concurrent.futures.as_completed(futures)):
                 tmpArray = future.result()
-                self.FactorDataArray[i] = tmpArray
+                if len(self.FactorDataArray[i]) == tmpArray.size:
+                    self.FactorDataArray[i] = tmpArray
+                else:
+                    self.FactorDataArray[i] = tmpArray[0:len(self.FactorDataArray[i])]
+
                 nr_nonzero_abs = np.count_nonzero(tmpArray)
                 nr_nonzero_perc = nr_nonzero_abs / tmpArray.size * 100
                 msg2 = "{:s} - min. {:.3f} - max. {:.3f} - nnz. {:d} ({:.2f}%)"
@@ -125,8 +142,15 @@ class DataContainer():
             return
         try:
             prefixDict_matrix = {self.matrixFilePath: utils.getChromPrefixCooler(self.matrixFilePath)}
-            chromname = prefixDict_matrix[self.matrixFilePath] + self.chromosome
-            chromsize_matrix = utils.getChromSizesFromCooler(self.matrixFilePath)[chromname]
+            if isinstance(self.chromosome, list):
+                chromname = [prefixDict_matrix[self.matrixFilePath] + chrom for chrom in self.chromosome]
+                chromsize_matrix = sum(utils.getChromSizesFromCooler(self.matrixFilePath)[chrom] for chrom in chromname)
+
+            else:
+                chromname = prefixDict_matrix[self.matrixFilePath] + self.chromosome
+                chromsize_matrix = utils.getChromSizesFromCooler(self.matrixFilePath)[chromname]
+
+            # chromname = prefixDict_matrix[self.matrixFilePath] + self.chromosome
             sparseHiCMatrix, binSize = utils.getMatrixFromCooler(self.matrixFilePath, chromname)
         except:
             msg = "Error: Could not load data from Hi-C matrix {:s}"
@@ -153,7 +177,11 @@ class DataContainer():
             raise IOError(msg)
         msg = "Loaded cooler matrix {:s}\n".format(self.matrixFilePath)
         msg += "chr. {:s}, matshape {:d}*{:d} -- min. {:d} -- max. {:d} -- nnz. {:d}"
-        msg = msg.format(self.chromosome, self.sparseHiCMatrix.shape[0], self.sparseHiCMatrix.shape[1], int(self.sparseHiCMatrix.min()), int(self.sparseHiCMatrix.max()), self.sparseHiCMatrix.getnnz() )
+        if isinstance(self.chromosome, list):
+            chromname = str(self.chromosome)
+        else:
+            chromname = self.chromosome
+        msg = msg.format(chromname, self.sparseHiCMatrix.shape[0], self.sparseHiCMatrix.shape[1], int(self.sparseHiCMatrix.min()), int(self.sparseHiCMatrix.max()), self.sparseHiCMatrix.getnnz() )
         print(msg)
     
     def __unloadFactorData(self):
@@ -281,6 +309,9 @@ class DataContainer():
     def getNumberSamples(self):
         if not self.data_loaded:
             return None
+        # log.debug("self.FactorDataArray.shape: {}".format(self.FactorDataArray.shape))
+        # log.debug("self.sparseHiCMatrix.shape: {}".format(self.sparseHiCMatrix.shape))
+        # log.debug("self.sequenceArray.shape: {}".format(self.sequenceArray))
         featureArrays = [self.FactorDataArray, self.sparseHiCMatrix, self.sequenceArray]
         cutouts = [self.windowSize+2*self.flankingSize, self.windowSize+2*self.flankingSize, (self.windowSize+2*self.flankingSize)*self.binSize]
         nr_samples_list = []
@@ -290,6 +321,7 @@ class DataContainer():
             else:
                 nr_samples_list.append(0)
         #check if all features have the same number of samples
+        log.debug("nr_samples_list: {}".format(nr_samples_list))
         if len(set( [x for x in nr_samples_list if x>0] )) != 1:
             msg = "Error: sample binning / DNA sequence encoding went wrong"
             raise RuntimeError(msg)

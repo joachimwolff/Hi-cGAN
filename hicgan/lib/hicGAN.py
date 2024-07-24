@@ -31,7 +31,7 @@ class HiCGAN():
         self.OUTPUT_CHANNELS = 1
         self.INPUT_CHANNELS = 1
         self.input_size = 256
-        if input_size in [16, 32, 64, 128, 256, 512]:
+        if input_size in [64, 128, 256, 512]:
             self.input_size = input_size
         self.number_factors = number_factors
         self.loss_weight_pixel = loss_weight_pixel
@@ -165,10 +165,6 @@ class HiCGAN():
         if self.input_size < 128:
             down_stack = down_stack[:-2] + down_stack[-1:]
         if self.input_size < 64:
-            down_stack = down_stack[:-2] + down_stack[-1:]
-        if self.input_size < 32:
-            down_stack = down_stack[:-2] + down_stack[-1:]
-        if self.input_size < 16:
             down_stack = down_stack[:-2] + down_stack[-1:]
         #the upsampling portion of the generator, designed for 256x256 images
         up_stack = [
