@@ -13,6 +13,7 @@ import tarfile
 import gzip
 import tempfile
 import io
+import cooler
 log = logging.getLogger(__name__)
 
 def parse_arguments():
@@ -136,7 +137,7 @@ def prediction(trainedmodel, predictionChromosomesFolders, predictionChromosomes
     matrixname = os.path.join(outputFolder, matrixOutputName)
     log.info("Writing predicted matrix to disk on %s..." % matrixname)   
 
-    utils.writeCooler(pMatrixList=predList, 
+    predicted_matrix_cooler_raw = utils.writeCooler(pMatrixList=predList, 
                       pBinSizeInt=binSize, 
                       pOutfile=matrixname, 
                       pChromosomeList=chromNameList)
@@ -152,6 +153,7 @@ def prediction(trainedmodel, predictionChromosomesFolders, predictionChromosomes
         if os.path.exists(tfrecordfile):
             os.remove(tfrecordfile)
 
+    return predicted_matrix_cooler_raw
 
 def extract_specific_file_to_temp_dir(tar_gz_path, file_to_extract):
     # Create a temporary directory
@@ -191,6 +193,7 @@ def main():
     generator_files = list_files_in_tar_gz(args.trainedModel)
     log.debug(f"Generator files: {generator_files}")
     
+    resolutions_predicted = {}
         # Iterate through each model directory and load the model
     for generator in generator_files:
         
@@ -203,10 +206,13 @@ def main():
         log.debug(f"Output folder: {args.outputFolder}")
         binSize = int(os.path.basename(generator).split(".")[0])
         log.debug(f"Bin size: {binSize}")
-        prediction(
+        predicted_matrix_cooler_raw = prediction(
             extracted_file_path, predictionChromosomesFolders, predictionChromosomes, outputFolder, 
             multiplier, binSize, batchSize, windowSize, str(binSize) + "_" + matrixOutputName, parameterOutputFile
         )
+        resolutions_predicted[binSize] = predicted_matrix_cooler_raw
         temp_dir.cleanup()
 
-  
+    for resolution, matrix in resolutions_predicted.items():
+        log.info(f"Predicted matrix at resolution {resolution} written to {matrix}")
+        cooler.create_cooler(matrixOutputName + "::/resolutions/" + str(resolution), bins=matrix["bins"], pixels=matrix["pixels"], dtypes=matrix["dtypes"], ordered=matrix["ordered"], metadata=matrix["metadata"], mode='a')

@@ -317,8 +317,9 @@ def writeCooler(pMatrixList, pBinSizeInt, pOutfile, pChromosomeList, pChromSizeL
     bins["end"] = bins["end"].astype("uint32")
     offsetList = offsetList[:-1] #don't need the last one, no more matrix to follow
 
+    return {"bins":bins, "pixels": pixelGenerator(pMatrixList=pMatrixList, pOffsetList=offsetList), "dtypes":{'count': np.float64}, "ordered":True, "metadata":pMetadata}
     #write out the cooler
-    cooler.create_cooler(pOutfile, bins=bins, pixels=pixelGenerator(pMatrixList=pMatrixList, pOffsetList=offsetList), dtypes={'count': np.float64}, ordered=True, metadata=pMetadata)
+    # cooler.create_cooler(pOutfile, bins=bins, pixels=pixelGenerator(pMatrixList=pMatrixList, pOffsetList=offsetList), dtypes={'count': np.float64}, ordered=True, metadata=pMetadata)
 
 def distanceNormalize(pSparseCsrMatrix, pWindowSize_bins):
     #compute the means along the diagonals (= same distance)

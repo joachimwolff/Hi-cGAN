@@ -250,7 +250,7 @@ class DataContainer():
         log.debug("self.factorNames: {:s} -- container.factorNames: {:s}".format(str(self.factorNames), str(container.factorNames)))
         return factorsOK and matrixOK and windowSizeOK and flankingSizeOK and maximumDistanceOK
         
-    def writeTFRecord(self, pOutputFolder, pRecordSize=None):
+    def writeTFRecord(self, pOutputFolder, pRecordSize=None, offsetFactor=0):
         '''
         Write a dataset to disk in tensorflow TFRecord format
         
@@ -280,15 +280,17 @@ class DataContainer():
         target_ct = int( np.floor(nr_samples/nr_files) )
         samples_per_file = [target_ct]*(nr_files-1) + [nr_samples-(nr_files-1)*target_ct]
         sample_indices = [sum(samples_per_file[0:i]) for i in range(len(samples_per_file)+1)] 
+        log.debug("nr_samples: {:d} -- nr_files: {:d} -- samples_per_file: {:s} -- sample_indices: {:s}".format(nr_samples, nr_files, str(samples_per_file), str(sample_indices)))
         #write the single files
         folderName = self.chromatinFolder.rstrip("/").replace("/","-")
         recordfiles = [os.path.join(pOutputFolder, "{:s}_{:s}_{:03d}.tfrecord".format(folderName, str(self.chromosome), i + 1)) for i in range(nr_files)]
 
-        def storeTFRecord(recordfile, firstIndex, lastIndex, outfolder):
+        def storeTFRecord(recordfile, firstIndex, lastIndex, outfolder, offsetFactor):
             log.debug("Prepare dict...")
             recordDict, storedFeaturesDict = self.__prepareWriteoutDict(pFirstIndex=firstIndex, 
                                                                         pLastIndex=lastIndex, 
-                                                                        pOutfolder=outfolder)
+                                                                        pOutfolder=outfolder,
+                                                                        offsetFactor=offsetFactor)
             log.debug("Prepare dict... DONE!")
             log.debug("Write TFRecord...")
             records.writeTFRecord(pFilename=recordfile, pRecordDict=recordDict)
@@ -298,7 +300,7 @@ class DataContainer():
 
         storedFeaturesDictList = []
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            results = [executor.submit(storeTFRecord, recordfile, firstIndex, lastIndex, pOutputFolder) for recordfile, firstIndex, lastIndex in zip(recordfiles, sample_indices, sample_indices[1:])]
+            results = [executor.submit(storeTFRecord, recordfile, firstIndex, lastIndex, pOutputFolder, offsetFactor) for recordfile, firstIndex, lastIndex in zip(recordfiles, sample_indices, sample_indices[1:])]
             for future in concurrent.futures.as_completed(results):
                 storedFeaturesDict = future.result()
                 storedFeaturesDictList.append(storedFeaturesDict)
@@ -309,9 +311,9 @@ class DataContainer():
     def getNumberSamples(self):
         if not self.data_loaded:
             return None
-        # log.debug("self.FactorDataArray.shape: {}".format(self.FactorDataArray.shape))
-        # log.debug("self.sparseHiCMatrix.shape: {}".format(self.sparseHiCMatrix.shape))
-        # log.debug("self.sequenceArray.shape: {}".format(self.sequenceArray))
+        log.debug("self.FactorDataArray.shape: {}".format(self.FactorDataArray.shape))
+        log.debug("self.sparseHiCMatrix.shape: {}".format(self.sparseHiCMatrix.shape))
+        log.debug("self.sequenceArray.shape: {}".format(self.sequenceArray))
         featureArrays = [self.FactorDataArray, self.sparseHiCMatrix, self.sequenceArray]
         cutouts = [self.windowSize+2*self.flankingSize, self.windowSize+2*self.flankingSize, (self.windowSize+2*self.flankingSize)*self.binSize]
         nr_samples_list = []
@@ -325,9 +327,11 @@ class DataContainer():
         if len(set( [x for x in nr_samples_list if x>0] )) != 1:
             msg = "Error: sample binning / DNA sequence encoding went wrong"
             raise RuntimeError(msg)
+        log.debug("nr_samples_list: {}".format(nr_samples_list))
+
         return max(nr_samples_list)
 
-    def __getMatrixData(self, idx):
+    def __getMatrixData(self, idx, offsetFactor=0):
         if self.matrixFilePath is None:
             return None # this can't work
         if not self.data_loaded:
@@ -341,7 +345,23 @@ class DataContainer():
             self.flankingSize = windowSize
         startInd = idx + flankingSize
         stopInd = startInd + windowSize
-        trainmatrix = self.sparseHiCMatrix[startInd:stopInd,startInd:stopInd].todense()
+
+        if offsetFactor:
+            startInd = idx + flankingSize* (1 + offsetFactor)
+            stopInd = startInd + windowSize
+            length = stopInd - startInd
+            factor = (length // 2) * offsetFactor
+            startInd_x = startInd + factor
+            stopInd_y = stopInd - factor
+
+            startInd_y = startInd - factor
+            stopInd_x = stopInd + factor
+        # log.debug("idx: {} -- startInd: {} -- stopInd: {} -- flankingSize: {} -- windowSize: {}".format(idx, startInd, stopInd, flankingSize, windowSize))
+
+        if offsetFactor:
+            trainmatrix = self.sparseHiCMatrix[startInd_x:stopInd_y,startInd_y:stopInd_x].todense()
+        else:
+            trainmatrix = self.sparseHiCMatrix[startInd:stopInd,startInd:stopInd].todense()
         trainmatrix = np.array(np.nan_to_num(trainmatrix))
         trainmatrix = np.expand_dims(trainmatrix, axis=-1) #make Hi-C (sub-)matrix an RGB image
         return trainmatrix
@@ -364,11 +384,15 @@ class DataContainer():
         factorArray = np.expand_dims(factorArray, axis=-1)
         return factorArray
 
-    def getSampleData(self, idx):
+    def getSampleData(self, idx, offsetFactor=0):
+        '''
+        idx: int Bin index position of the sample in the dataset
+        offsetFactor: int Offset factor for the Hi-C matrix to get training data far off the main diagonal
+        '''
         if not self.data_loaded:
             return None
         factorArray = self.__getFactorData(idx)
-        matrixArray = self.__getMatrixData(idx)
+        matrixArray = self.__getMatrixData(idx, offsetFactor)
         if matrixArray is not None:
             matrixArray = matrixArray.astype("float32")
         return {"factorData": factorArray.astype("float32"), 
@@ -443,16 +467,16 @@ class DataContainer():
         filename = os.path.join(outputpath, filename)
         save_npz(file=filename, matrix=sparseMatrix)
 
-    def __prepareWriteoutDict(self, pFirstIndex, pLastIndex, pOutfolder):
+    def __prepareWriteoutDict(self, pFirstIndex, pLastIndex, pOutfolder, offsetFactor=0):
         if not self.data_loaded:
             msg = "Error: no data loaded, nothing to prepare"
             raise RuntimeError(msg)
 
-        def get_sample_data(idx):
-            return self.getSampleData(idx=idx)
-
+        def get_sample_data(idx, offsetFactor):
+            return self.getSampleData(idx=idx, offsetFactor=offsetFactor)
+        
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            data = list(executor.map(get_sample_data, range(pFirstIndex, pLastIndex)))
+            data = list(executor.map(lambda idx: get_sample_data(idx, offsetFactor), range(pFirstIndex, pLastIndex)))
         recordDict = dict()
         storedFeaturesDict = dict()
         if len(data) < 1:

@@ -236,7 +236,8 @@ def training(trainingMatrices,
             msg = "Aborting. Incompatible data"
             raise SystemExit(msg)
         tfRecordFilenames.append(container.writeTFRecord(pOutputFolder=outputFolder,
-                                                        pRecordSize=recordSize))
+                                                        pRecordSize=recordSize, 
+                                                        offsetFactor=1))
         if debugstate is not None:
             if isinstance(debugstate, int):
                 idx = debugstate
