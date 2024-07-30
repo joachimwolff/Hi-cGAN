@@ -22,7 +22,6 @@ class DataContainer():
         self.FactorDataArray = None
         self.nr_factors = None
         self.sparseHiCMatrix = None
-        self.sequenceArray = None
         self.binSize = None
         if matrixFilePath is None: #otherwise it will be defined by the Hi-C matrix itself upon loading
             self.binSize = binSize
@@ -107,12 +106,10 @@ class DataContainer():
                 chromname = [self.prefixDict_factors[bigwigFile] + chrom for chrom in self.chromosome]
             else:
                 chromname = self.prefixDict_factors[bigwigFile] + self.chromosome
-            # log.debug("Chromosome size: {:d}".format(self.chromSize_factors))
             tmpArray = utils.binChromatinFactor(pBigwigFileName=bigwigFile,
                                                 pBinSizeInt=self.binSize,
                                                 pChromStr=chromname,
                                                 pChromSize=self.chromSize_factors)
-            # log.debug('Size of tmpArray: {}'.format(tmpArray.shape))
             if clampFeatures:
                 tmpArray = utils.clampArray(tmpArray)
             if scaleFeatures:
@@ -269,7 +266,8 @@ class DataContainer():
             msg = "Warning: No data loaded, nothing to write"
             print(msg)
             return None
-        nr_samples = self.getNumberSamples()
+        nr_samples = self.getNumberSamples(offsetFactor)
+        log.debug("nr_samples: {:d}".format(nr_samples))
         #adjust record size (yields smaller files and reduces memory load)
         recordsize = nr_samples
         if pRecordSize is not None and pRecordSize < recordsize:
@@ -286,15 +284,15 @@ class DataContainer():
         recordfiles = [os.path.join(pOutputFolder, "{:s}_{:s}_{:03d}.tfrecord".format(folderName, str(self.chromosome), i + 1)) for i in range(nr_files)]
 
         def storeTFRecord(recordfile, firstIndex, lastIndex, outfolder, offsetFactor):
-            log.debug("Prepare dict...")
+            # log.debug("Prepare dict...")
             recordDict, storedFeaturesDict = self.__prepareWriteoutDict(pFirstIndex=firstIndex, 
                                                                         pLastIndex=lastIndex, 
                                                                         pOutfolder=outfolder,
                                                                         offsetFactor=offsetFactor)
-            log.debug("Prepare dict... DONE!")
-            log.debug("Write TFRecord...")
+            # log.debug("Prepare dict... DONE!")
+            # log.debug("Write TFRecord...")
             records.writeTFRecord(pFilename=recordfile, pRecordDict=recordDict)
-            log.debug("Write TFRecord... DONE!")
+            # log.debug("Write TFRecord... DONE!")
 
             return storedFeaturesDict
 
@@ -308,18 +306,15 @@ class DataContainer():
         self.storedFeatures = storedFeaturesDict
         return recordfiles
 
-    def getNumberSamples(self):
+    def getNumberSamples(self, offsetFactor=0):
         if not self.data_loaded:
             return None
-        log.debug("self.FactorDataArray.shape: {}".format(self.FactorDataArray.shape))
-        log.debug("self.sparseHiCMatrix.shape: {}".format(self.sparseHiCMatrix.shape))
-        log.debug("self.sequenceArray.shape: {}".format(self.sequenceArray))
-        featureArrays = [self.FactorDataArray, self.sparseHiCMatrix, self.sequenceArray]
-        cutouts = [self.windowSize+2*self.flankingSize, self.windowSize+2*self.flankingSize, (self.windowSize+2*self.flankingSize)*self.binSize]
+        featureArrays = [self.FactorDataArray, self.sparseHiCMatrix]
+        cutouts = [self.windowSize+2*self.flankingSize, self.windowSize+2*self.flankingSize]
         nr_samples_list = []
         for featureArray, cutout in zip(featureArrays, cutouts):
             if featureArray is not None:
-                nr_samples_list.append(featureArray.shape[0] - cutout + 1)
+                nr_samples_list.append(featureArray.shape[0] - cutout + 1 - (offsetFactor*cutout))
             else:
                 nr_samples_list.append(0)
         #check if all features have the same number of samples
@@ -338,17 +333,18 @@ class DataContainer():
             msg = "Error: Load data first"
             raise RuntimeError(msg)
         #the 0-th matrix starts flankingSize away from the boundary
-        windowSize = self.windowSize
-        flankingSize = self.flankingSize
-        if flankingSize is None:
-            flankingSize = windowSize
-            self.flankingSize = windowSize
-        startInd = idx + flankingSize
-        stopInd = startInd + windowSize
+        # windowSize = self.windowSize
+        # flankingSize = self.flankingSize
+        if self.flankingSize is None:
+            # flankingSize = self.windowSize
+            self.flankingSize = self.windowSize
+        startInd = idx + self.flankingSize
+        stopInd = startInd + self.windowSize
+        # log.debug("No Offset idx: {} -- startInd: {} -- stopInd: {} -- flankingSize: {} -- windowSize: {}".format(idx, startInd, stopInd, self.flankingSize, self.windowSize))
 
         if offsetFactor:
-            startInd = idx + flankingSize* (1 + offsetFactor)
-            stopInd = startInd + windowSize
+            startInd = idx + (self.flankingSize * (2 + offsetFactor))
+            stopInd = startInd + self.windowSize
             length = stopInd - startInd
             factor = (length // 2) * offsetFactor
             startInd_x = startInd + factor
@@ -356,30 +352,32 @@ class DataContainer():
 
             startInd_y = startInd - factor
             stopInd_x = stopInd + factor
-        # log.debug("idx: {} -- startInd: {} -- stopInd: {} -- flankingSize: {} -- windowSize: {}".format(idx, startInd, stopInd, flankingSize, windowSize))
+        # log.debug("idx: {} -- startInd: {} -- stopInd: {} -- flankingSize: {} -- windowSize: {} -- startInd_x {} -- startInd_y {} -- stopInd_x {} -- stopInd_y {} -- hicMatrix.shape {}".format(idx, idx + self.flankingSize, idx + self.flankingSize+self.windowSize, self.flankingSize, self.windowSize, startInd_x, startInd_y, stopInd_x, stopInd_y, self.sparseHiCMatrix.shape))
 
         if offsetFactor:
-            trainmatrix = self.sparseHiCMatrix[startInd_x:stopInd_y,startInd_y:stopInd_x].todense()
+            trainmatrix = self.sparseHiCMatrix[startInd_x:stopInd_x,startInd_y:stopInd_y].todense()
         else:
             trainmatrix = self.sparseHiCMatrix[startInd:stopInd,startInd:stopInd].todense()
+        
+        # log.debug("startInd_y: {} -- stopInd_y: {} -- startInd_x: {} -- stopInd_x: {} -- trainmatrix.shape: {} -- self.sparseHiCMatrix.shape {}".format(startInd_y, stopInd_y, startInd_x, stopInd_x, trainmatrix.shape, self.sparseHiCMatrix.shape))
         trainmatrix = np.array(np.nan_to_num(trainmatrix))
         trainmatrix = np.expand_dims(trainmatrix, axis=-1) #make Hi-C (sub-)matrix an RGB image
         return trainmatrix
     
-    def __getFactorData(self, idx):
+    def __getFactorData(self, idx, offsetFactor=0):
         if self.chromatinFolder is None:
             return None
         if not self.data_loaded:
             msg = "Error: Load data first"
             raise RuntimeError(msg)
         #the 0-th feature matrix starts at position 0
-        windowSize = self.windowSize
-        flankingSize = self.flankingSize
-        if flankingSize is None:
-            flankingSize = windowSize
-            self.flankingSize = windowSize
+        # windowSize = self.windowSize
+        # flankingSize = self.flankingSize
+        if self.flankingSize is None:
+            # flankingSize = windowSize
+            self.flankingSize = self.windowSize
         startIdx = idx
-        endIdx = startIdx + 2*flankingSize + windowSize
+        endIdx = startIdx + 2*self.flankingSize + self.windowSize
         factorArray = self.FactorDataArray[startIdx:endIdx]
         factorArray = np.expand_dims(factorArray, axis=-1)
         return factorArray
@@ -391,8 +389,10 @@ class DataContainer():
         '''
         if not self.data_loaded:
             return None
-        factorArray = self.__getFactorData(idx)
+        factorArray = self.__getFactorData(idx, offsetFactor)
         matrixArray = self.__getMatrixData(idx, offsetFactor)
+
+        # log.debug("factorArray.shape: {} -- matrixArray.shape: {}".format(factorArray.shape, matrixArray.shape))
         if matrixArray is not None:
             matrixArray = matrixArray.astype("float32")
         return {"factorData": factorArray.astype("float32"), 
@@ -486,14 +486,21 @@ class DataContainer():
         for key in data[0]:
             featData = [feature[key] for feature in data]
             if not any(elem is None for elem in featData):
-                recordDict[key] = np.array(featData)
-                storedFeaturesDict[key] = {"shape": recordDict[key].shape[1:], "dtype": tfdtypes.as_dtype(recordDict[key].dtype)}
+                try:
+                    recordDict[key] = np.array(featData)
+                    storedFeaturesDict[key] = {"shape": recordDict[key].shape[1:], "dtype": tfdtypes.as_dtype(recordDict[key].dtype)}
+                    log.debug('storedFeaturesDict[key] {}'.format(storedFeaturesDict[key]))
+                except Exception as e:
+                    msg = "Error: Could not convert data to numpy array"
+                    log.error('featData: {}'.format(featData))
+                    raise RuntimeError(msg)
 
         def process_feature(key):
             featData = [feature[key] for feature in data]
             if not any(elem is None for elem in featData):
                 recordDict[key] = np.array(featData)
                 storedFeaturesDict[key] = {"shape": recordDict[key].shape[1:], "dtype": tfdtypes.as_dtype(recordDict[key].dtype)}
+                log.debug('storedFeaturesDict[key] {}'.format(storedFeaturesDict[key]))
 
         with concurrent.futures.ThreadPoolExecutor() as executor:
             executor.map(process_feature, data[0].keys())

@@ -123,7 +123,7 @@ def scaleArray(pArray):
     Returns:
     array scaled to value range [0..1]
     ''' 
-    log.debug("pArray: %s", pArray)
+    # log.debug("pArray: %s", pArray)
     if pArray is None or pArray.size == 0:
         msg = "cannot normalize empty array"
         print(msg)

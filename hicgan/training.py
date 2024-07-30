@@ -107,6 +107,10 @@ def parse_arguments(args=None):
                         type=int,
                         default=10,
                         help="Update loss over epoch plots after this number of epochs.")
+    parser.add_argument("--offsetFactor", "-of", required=False,
+                        type=int,
+                        default=5,
+                        help="How many times the window size should be shifted away from the diagonal for deeper learning. Each offset will be trained separately.")
     parser.add_argument('--version', action='version',
                            version='%(prog)s {}'.format(__version__))
 
@@ -140,6 +144,7 @@ def training(trainingMatrices,
              recordSize,
              plotFrequency, 
              interChoromosomalTraining,
+             offsetFactor=0,
              scope=None):
 
     interChoromosomalTraining = False
@@ -237,7 +242,7 @@ def training(trainingMatrices,
             raise SystemExit(msg)
         tfRecordFilenames.append(container.writeTFRecord(pOutputFolder=outputFolder,
                                                         pRecordSize=recordSize, 
-                                                        offsetFactor=1))
+                                                        offsetFactor=offsetFactor))
         if debugstate is not None:
             if isinstance(debugstate, int):
                 idx = debugstate
@@ -401,41 +406,43 @@ def main(args=None):
         matrix_resolutions_validation = [args.validationMatrices]
         submatrices = ["single"]
     for submatrix, training_matrices, validation_matrices in zip(submatrices, matrix_resolutions_training, matrix_resolutions_validation):
+        for offsetFactor in range(-1, args.offsetFactor):
+            strategy = tf.distribute.MirroredStrategy()
 
-        strategy = tf.distribute.MirroredStrategy()
-
-        with strategy.scope() as scope: 
-            training(
-                trainingMatrices=training_matrices,
-                trainingChromosomes=args.trainingChromosomes,
-                trainingChromosomesFolders=args.trainingChromosomesFolders,
-                validationMatrices=validation_matrices,
-                validationChromosomes=args.validationChromosomes,
-                validationChromosomesFolders=args.validationChromosomesFolders,
-                windowSize=args.windowSize,
-                outputFolder=os.path.join(args.outputFolder, submatrix.split('/')[-1]),
-                epochs=args.epochs,
-                batchSize=args.batchSize,
-                lossWeightPixel=args.lossWeightPixel,
-                lossWeightDiscriminator=args.lossWeightDiscriminator,
-                lossWeightAdversarial=args.lossWeightAdversarial,
-                lossTypePixel=args.lossTypePixel,
-                lossWeightTV=args.lossWeightTV,
-                learningRateGenerator=args.learningRateGenerator,
-                learningRateDiscriminator=args.learningRateDiscriminator,
-                beta1=args.beta1,
-                flipSamples=args.flipSamples,
-                figureFileFormat=args.figureFileFormat,
-                recordSize=args.recordSize,
-                plotFrequency=args.plotFrequency,
-                interChoromosomalTraining=args.interChromosomalTraining,
-                scope=scope
-            )  # pylint: disable=no-value-for-parameter
+            with strategy.scope() as scope: 
+                training(
+                    trainingMatrices=training_matrices,
+                    trainingChromosomes=args.trainingChromosomes,
+                    trainingChromosomesFolders=args.trainingChromosomesFolders,
+                    validationMatrices=validation_matrices,
+                    validationChromosomes=args.validationChromosomes,
+                    validationChromosomesFolders=args.validationChromosomesFolders,
+                    windowSize=args.windowSize,
+                    outputFolder=os.path.join(args.outputFolder, submatrix.split('/')[-1], "offset_" + str(offsetFactor + 1)),
+                    epochs=args.epochs,
+                    batchSize=args.batchSize,
+                    lossWeightPixel=args.lossWeightPixel,
+                    lossWeightDiscriminator=args.lossWeightDiscriminator,
+                    lossWeightAdversarial=args.lossWeightAdversarial,
+                    lossTypePixel=args.lossTypePixel,
+                    lossWeightTV=args.lossWeightTV,
+                    learningRateGenerator=args.learningRateGenerator,
+                    learningRateDiscriminator=args.learningRateDiscriminator,
+                    beta1=args.beta1,
+                    flipSamples=args.flipSamples,
+                    figureFileFormat=args.figureFileFormat,
+                    recordSize=args.recordSize,
+                    plotFrequency=args.plotFrequency,
+                    interChoromosomalTraining=args.interChromosomalTraining,
+                    offsetFactor=offsetFactor + 1,
+                    scope=scope
+                )  # pylint: disable=no-value-for-parameter
 
     with tarfile.open(os.path.join(args.outputFolder, 'trainedModel.tar.gz'), "w:gz") as tar:
         for submatrix in submatrices_write_out:
-            file_name = os.path.join(args.outputFolder, submatrix.split('/')[-1], "generator_final.keras")
-            tar.add(file_name, arcname=submatrix.split('/')[-1] + '.keras')
+            for offsetFactor in range(-1, args.offsetFactor):
+                file_name = os.path.join(args.outputFolder, submatrix.split('/')[-1],  "offset_" + str(offsetFactor + 1), "generator_final.keras")
+                tar.add(file_name, arcname=submatrix.split('/')[-1] +  "offset_" + str(offsetFactor + 1) +  '.keras')
     
     # with h5py.File(os.path.join(args.outputFolder, 'trainedModel.hdf'), 'w') as hdf5_file:
     #     for submatrix in submatrices:
