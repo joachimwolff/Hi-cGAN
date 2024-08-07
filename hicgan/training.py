@@ -310,74 +310,71 @@ def main(args=None):
             msg = "Exiting. Matrix file not found: {:s}".format(matrix)
             print(msg)
             return
-        if not matrix.endswith(".mcool"):
-            msg = "Exiting. Only .mcool matrices are supported: {:s}".format(matrix)
+        if not matrix.endswith(".cool"):
+            msg = "Exiting. Only .cool matrices are supported: {:s}".format(matrix)
             print(msg)
             return
-        if not cooler.fileops.is_multires_file(matrix):
-            msg = "Exiting. Invalid cooler file: {:s}".format(matrix)
-            print(msg)
-            return
+       
             
     
-    submatrices = cooler.fileops.list_coolers(args.trainingChromosomesFolders[0])
+    # submatrices = cooler.fileops.list_coolers(args.trainingChromosomesFolders[0])
 
-    matrix_resolutions_training = [[]] * len(submatrices)
-    matrix_resolutions_validation = [[]] * len(submatrices)
+    # matrix_resolutions_training = [[]] * len(submatrices)
+    # matrix_resolutions_validation = [[]] * len(submatrices)
 
-    for matrix in args.trainingChromosomesFolders:
-        for i, submatrix in enumerate(submatrices):
-            if not cooler.fileops.is_cooler(matrix + "::" + submatrix):
-                msg = "Exiting. Invalid cooler file: {:s}. All matrices need to have the same resolutions.".format(matrix)
-                print(msg)
-                return
-            matrix_resolutions_training[i].append(matrix + "::" + submatrix)
-    for matrix in args.validationChromosomesFolders:
-        for i, submatrix in enumerate(submatrices):
-            if not cooler.fileops.is_cooler(matrix + "::" + submatrix):
-                msg = "Exiting. Invalid cooler file: {:s}. All matrices need to have the same resolutions.".format(matrix)
-                print(msg)
-                return
-            matrix_resolutions_validation[i].append(matrix + "::" + submatrix)
+    # for matrix in args.trainingChromosomesFolders:
+    #     for i, submatrix in enumerate(submatrices):
+    #         if not cooler.fileops.is_cooler(matrix + "::" + submatrix):
+    #             msg = "Exiting. Invalid cooler file: {:s}. All matrices need to have the same resolutions.".format(matrix)
+    #             print(msg)
+    #             return
+    #         matrix_resolutions_training[i].append(matrix + "::" + submatrix)
+    # for matrix in args.validationChromosomesFolders:
+    #     for i, submatrix in enumerate(submatrices):
+    #         if not cooler.fileops.is_cooler(matrix + "::" + submatrix):
+    #             msg = "Exiting. Invalid cooler file: {:s}. All matrices need to have the same resolutions.".format(matrix)
+    #             print(msg)
+    #             return
+    #         matrix_resolutions_validation[i].append(matrix + "::" + submatrix)
     
-    for i, (training_matrices, validation_matrices) in enumerate(zip(matrix_resolutions_training, matrix_resolutions_validation)):
+    # for i, (training_matrices, validation_matrices) in enumerate(zip(matrix_resolutions_training, matrix_resolutions_validation)):
 
-        strategy = tf.distribute.MirroredStrategy()
+    strategy = tf.distribute.MirroredStrategy()
 
 
 
-        with strategy.scope() as scope: 
-            training(
-                trainingMatrices=training_matrices,
-                trainingChromosomes=args.trainingChromosomes,
-                trainingChromosomesFolders=args.trainingChromosomesFolders,
-                validationMatrices=validation_matrices,
-                validationChromosomes=args.validationChromosomes,
-                validationChromosomesFolders=args.validationChromosomesFolders,
-                windowSize=args.windowSize,
-                outputFolder=os.path.join(args.outputFolder, str(i)),
-                epochs=args.epochs,
-                batchSize=args.batchSize,
-                lossWeightPixel=args.lossWeightPixel,
-                lossWeightDiscriminator=args.lossWeightDiscriminator,
-                lossWeightAdversarial=args.lossWeightAdversarial,
-                lossTypePixel=args.lossTypePixel,
-                lossWeightTV=args.lossWeightTV,
-                learningRateGenerator=args.learningRateGenerator,
-                learningRateDiscriminator=args.learningRateDiscriminator,
-                beta1=args.beta1,
-                flipSamples=args.flipSamples,
-                figureFileFormat=args.figureFileFormat,
-                recordSize=args.recordSize,
-                plotFrequency=args.plotFrequency,
-                scope=scope
-            )  # pylint: disable=no-value-for-parameter
+    with strategy.scope() as scope: 
+        training(
+            trainingMatrices=args.trainingMatrices,
+            trainingChromosomes=args.trainingChromosomes,
+            trainingChromosomesFolders=args.trainingChromosomesFolders,
+            validationMatrices=args.validationMatrices,
+            validationChromosomes=args.validationChromosomes,
+            validationChromosomesFolders=args.validationChromosomesFolders,
+            windowSize=args.windowSize,
+            outputFolder=args.outputFolder,
+            epochs=args.epochs,
+            batchSize=args.batchSize,
+            lossWeightPixel=args.lossWeightPixel,
+            lossWeightDiscriminator=args.lossWeightDiscriminator,
+            lossWeightAdversarial=args.lossWeightAdversarial,
+            lossTypePixel=args.lossTypePixel,
+            lossWeightTV=args.lossWeightTV,
+            learningRateGenerator=args.learningRateGenerator,
+            learningRateDiscriminator=args.learningRateDiscriminator,
+            beta1=args.beta1,
+            flipSamples=args.flipSamples,
+            figureFileFormat=args.figureFileFormat,
+            recordSize=args.recordSize,
+            plotFrequency=args.plotFrequency,
+            scope=scope
+        )  # pylint: disable=no-value-for-parameter
 
     
-    with h5py.File(os.path.join(args.outputFolder, 'trainedModel.hdf'), 'w') as hdf5_file:
-        for i in range(len(matrix_resolutions_training)):
-            file_name = os.path.basename(os.path.join(args.outputFolder, str(i), "generator_final.keras"))
-            with open(file_name, 'rb') as f:
-                file_data = f.read()
-                # Store the file data in the HDF5 file
-                hdf5_file.create_dataset(str(i) + '.keras', data=file_data)
+    # with h5py.File(os.path.join(args.outputFolder, 'trainedModel.hdf'), 'w') as hdf5_file:
+    #     for i in range(len(matrix_resolutions_training)):
+    #         file_name = os.path.basename(os.path.join(args.outputFolder, str(i), "generator_final.keras"))
+    #         with open(file_name, 'rb') as f:
+    #             file_data = f.read()
+    #             # Store the file data in the HDF5 file
+    #             hdf5_file.create_dataset(str(i) + '.keras', data=file_data)
