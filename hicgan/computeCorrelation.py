@@ -1,5 +1,5 @@
 import argparse
-from utils import computePearsonCorrelation
+from .lib import utils
 
 from hicgan._version import __version__
 
@@ -34,7 +34,7 @@ def main():
     model_cell_lines = args.model_cell_lines
     target_cell_lines = args.target_cell_lines
 
-    computePearsonCorrelation(coolfile1, coolfile2, windowSize, 
+    utils.computePearsonCorrelation(coolfile1, coolfile2, windowSize, 
                                 model_chromosomes, target_chromosome, 
                                 model_cell_lines, target_cell_lines,
                                 outputname_plot, outputname_csv)

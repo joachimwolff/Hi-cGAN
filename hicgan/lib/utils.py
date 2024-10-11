@@ -409,7 +409,6 @@ def clampArray(pArray):
         clampedArray[clampedArray < lowerClampingBound] = lowerClampingBound
         clampedArray[clampedArray > upperClampingBound] = upperClampingBound
     return clampedArray
-
 def computePearsonCorrelation(pCoolerFile1, pCoolerFile2, 
                               pWindowsize_bp,
                               pModelChromList, pTargetChromStr,
