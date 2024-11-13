@@ -12,16 +12,18 @@ from hicgan._version import __version__
 
 log = logging.getLogger(__name__)
 
-def parse_arguments():
-    parser = argparse.ArgumentParser(description="Hi-cGAN Prediction")
-    parser.add_argument("--trainedModel", "-trm", required=True,
+def parse_arguments(args=None):
+    parser = argparse.ArgumentParser()
+    # parser = argparse.ArgumentParser(description="Hi-cGAN Prediction")
+    parser.add_argument("--trainedModel", "-trm", required=False,
                         type=str,
                         help="Trained generator model to predict from")
-    parser.add_argument("--predictionChromosomesFolders", "-tcp", required=True,
+    parser.add_argument("--predictionChromosomesFolders", "-tcp", required=False,
                         type=str,
                         help="Path where test data (bigwig files) resides")
-    parser.add_argument("--predictionChromosomes", "-pc", required=True,
+    parser.add_argument("--predictionChromosomes", "-pc", required=False,
                         type=str,
+                        nargs='+',
                         help="Chromosomes the Hi-C matrix should be predicted. Must be available in all bigwig files")
     parser.add_argument("--matrixOutputName", "-mn", required=False,
                         type=str,
@@ -39,14 +41,14 @@ def parse_arguments():
                         type=int, 
                         default=10, 
                         help="Multiplier for scaling the predicted coolers")
-    parser.add_argument("--binSize", "-b", required=True,
+    parser.add_argument("--binSize", "-b", required=False,
                         type=int, 
                         help="Bin size for binning the chromatin features")
     parser.add_argument("--batchSize", "-bs", required=False,
                         type=int,
                         default=32, 
                         help="Batch size for predicting")
-    parser.add_argument("--windowSize", "-ws", required=True,
+    parser.add_argument("--windowSize", "-ws", required=False,
                         type=int,
                         choices=[64, 128, 256, 512],
                         help="Window size for predicting; must be the same as in trained model. Supported values are 64, 128, and 256")
@@ -76,8 +78,8 @@ def prediction(args):
     paramDict = locals().copy()
         
     #extract chromosome names from the input
-    chromNameList = predictionChromosomes.replace(",", " ").rstrip().split(" ")  
-    chromNameList = sorted([x.lstrip("chr") for x in chromNameList])
+    # chromNameList = predictionChromosomes.replace(",", " ").rstrip().split(" ")  
+    chromNameList = sorted([x.lstrip("chr") for x in predictionChromosomes])
     
     containerCls = dataContainer.DataContainer
     testdataContainerList = []
@@ -156,6 +158,6 @@ def prediction(args):
             os.remove(tfrecordfile)
 
 
-def main():
-    args = parse_arguments()
+def main(args=None):
+    args = parse_arguments().parse_args(args)
     prediction(args)

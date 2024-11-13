@@ -24,7 +24,7 @@ def parse_arguments(args=None):
                         type=str, nargs='+',
                         help="mcooler matrices for training.")
     parser.add_argument("--trainingChromosomes", "-tchroms", required=True,
-                        type=str,
+                        type=str, nargs='+',
                         help="Train chromosomes. Must be present in all train matrices.")
     parser.add_argument("--trainingChromosomesFolders", "-tcp", required=True,
                         type=str, nargs='+',
@@ -33,7 +33,7 @@ def parse_arguments(args=None):
                         type=str, nargs='+',
                         help="Cooler matrices for validation.")
     parser.add_argument("--validationChromosomes", "-vchroms", required=True,
-                        type=str,
+                        type=str, nargs='+',
                         help="Validation chromosomes. Must be present in all validation matrices.")
     parser.add_argument("--validationChromosomesFolders", "-vcp", required=True,
                         type=str, nargs='+',
@@ -139,14 +139,14 @@ def training(trainingMatrices,
     #remove spaces, commas and "chr" from the train and val chromosome lists
     #ensure each chrom name is used only once, but allow the same chrom for train and validation
     #sort the lists and write to param dict
-    trainChromNameList = trainingChromosomes.replace(",","")
-    trainChromNameList = trainChromNameList.rstrip().split(" ")  
-    trainChromNameList = [x.lstrip("chr") for x in trainChromNameList]
+    # trainChromNameList = trainingChromosomes.replace(",","")
+    # trainChromNameList = trainChromNameList.rstrip().split(" ")  
+    trainChromNameList = [x.lstrip("chr") for x in trainingChromosomes]
     trainChromNameList = sorted(list(set(trainChromNameList)))
     paramDict["trainChromNameList"] = trainChromNameList
-    valChromNameList = validationChromosomes.replace(",","")
-    valChromNameList = valChromNameList.rstrip().split(" ")
-    valChromNameList = [x.lstrip("chr") for x in valChromNameList]
+    # valChromNameList = validationChromosomes.replace(",","")
+    # valChromNameList = valChromNameList.rstrip().split(" ")
+    valChromNameList = [x.lstrip("chr") for x in validationChromosomes]
     valChromNameList = sorted(list(set(valChromNameList)))
     paramDict["valChromNameList"] = valChromNameList
 
