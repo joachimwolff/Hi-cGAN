@@ -13,15 +13,15 @@ from ray import train, tune
 
 import logging
 from hicgan._version import __version__
-from hicgan.training import main as training_main
-from hicgan.predict import main as predict_main
+from hicgan.training import training
+from hicgan.predict import prediction
 from hicgan.lib.utils import computePearsonCorrelation
 
 log = logging.getLogger(__name__)
 
 import icecream as ic
 
-def parse_arguments():
+def parse_arguments(args=None):
     parser = argparse.ArgumentParser(description="Hi-cGAN Prediction")
     parser.add_argument("--optimizer", "-op", required=True,
                         type=str, choices=['raytune', 'opttuner'],
@@ -126,83 +126,116 @@ def parse_arguments():
 
 
 
-def objective_raytune(config, args):
+def objective_raytune(config, pArgs):
 
-    trainingMatricesString = ' '.join(args.trainingMatrices)
-    trainingChromosomesString = ' '.join(args.trainingChromosomes)
-    trainingChromosomesFoldersString = ' '.join(args.trainingChromosomesFolders)
-    validationMatricesString = ' '.join(args.validationMatrices)
-    validationChromosomesString = ' '.join(args.validationChromosomes)
-    validationChromosomesFoldersString = ' '.join(args.validationChromosomesFolders)
-    # testMatricesString = ' '.join(args.testMatrices)
-    # testChromosomesString = ' '.join(args.testChromosomes)
-    # testChromosomesFoldersString = ' '.join(args.testChromosomesFolders)
+    # trainingMatricesString = ' '.join(pArgs.trainingMatrices)
+    # trainingChromosomesString = ' '.join(pArgs.trainingChromosomes)
+    # trainingChromosomesFoldersString = ' '.join(pArgs.trainingChromosomesFolders)
+    # validationMatricesString = ' '.join(pArgs.validationMatrices)
+    # validationChromosomesString = ' '.join(pArgs.validationChromosomes)
+    # validationChromosomesFoldersString = ' '.join(pArgs.validationChromosomesFolders)
+    # # testMatricesString = ' '.join(args.testMatrices)
+    # # testChromosomesString = ' '.join(args.testChromosomes)
+    # # testChromosomesFoldersString = ' '.join(args.testChromosomesFolders)
 
-    args_string = "--trainingMatrices {} --trainingChromosomes {} \
-               --trainingChromosomesFolders {} --validationMatrices {} \
-               --validationChromosomes {} --validationChromosomesFolders {} \
-               --windowSize {} --outputFolder {} --epochs {} --batchSize {} \
-               --lossWeightPixel {} --lossWeightDiscriminator {} --lossTypePixel {} \
-               --lossWeightTV {} --lossWeightAdversarial {} --learningRateGenerator {} \
-               --learningRateDiscriminator {} --beta1 {} {} --figureFileFormat {} --recordSize {}".format(
-                   trainingMatricesString,  # --trainingMatrices
-                   trainingChromosomesString,  # --trainingChromosomes
-                   trainingChromosomesFoldersString,  # --trainingChromosomesFolders
-                   validationMatricesString,  # --validationMatrices
-                   validationChromosomesString,  # --validationChromosomes
-                   validationChromosomesFoldersString,  # --validationChromosomesFolders
-                   args.windowSize,  # --windowSize
-                   args.outputFolder,  # --outputFolder
-                   args.epochs,  # --epochs
-                   args.batchSize,  # --batchSize
-                   config["loss_weight_pixel"],  # --lossWeightPixel
-                   config["loss_weight_discriminator"],  # --lossWeightDiscriminator
-                   config["loss_type_pixel"],  # --lossTypePixel
-                   config["loss_weight_tv"],  # --lossWeightTV
-                   config["loss_weight_adversarial"],  # --lossWeightAdversarial
-                   config["learning_rate_generator"],  # --learningRateGenerator
-                   config["learning_rate_discriminator"],  # --learningRateDiscriminator
-                   config["beta1"],  # --beta1
-                   config["flip_samples"],  # --flipSamples
-                   "png",  # --figureFileFormat
-                   args.recordSize  # --recordSize
-               ).split()
+    # args_string = "--trainingMatrices {} --trainingChromosomes {} \
+    #            --trainingChromosomesFolders {} --validationMatrices {} \
+    #            --validationChromosomes {} --validationChromosomesFolders {} \
+    #            --windowSize {} --outputFolder {} --epochs {} --batchSize {} \
+    #            --lossWeightPixel {} --lossWeightDiscriminator {} --lossTypePixel {} \
+    #            --lossWeightTV {} --lossWeightAdversarial {} --learningRateGenerator {} \
+    #            --learningRateDiscriminator {} --beta1 {} {} --figureFileFormat {} --recordSize {}".format(
+    #                trainingMatricesString,  # --trainingMatrices
+    #                trainingChromosomesString,  # --trainingChromosomes
+    #                trainingChromosomesFoldersString,  # --trainingChromosomesFolders
+    #                validationMatricesString,  # --validationMatrices
+    #                validationChromosomesString,  # --validationChromosomes
+    #                validationChromosomesFoldersString,  # --validationChromosomesFolders
+    #                pArgs.windowSize,  # --windowSize
+    #                pArgs.outputFolder,  # --outputFolder
+    #                pArgs.epochs,  # --epochs
+    #                pArgs.batchSize,  # --batchSize
+    #                config["loss_weight_pixel"],  # --lossWeightPixel
+    #                config["loss_weight_discriminator"],  # --lossWeightDiscriminator
+    #                config["loss_type_pixel"],  # --lossTypePixel
+    #                config["loss_weight_tv"],  # --lossWeightTV
+    #                config["loss_weight_adversarial"],  # --lossWeightAdversarial
+    #                config["learning_rate_generator"],  # --learningRateGenerator
+    #                config["learning_rate_discriminator"],  # --learningRateDiscriminator
+    #                config["beta1"],  # --beta1
+    #                config["flip_samples"],  # --flipSamples
+    #                "png",  # --figureFileFormat
+    #                pArgs.recordSize  # --recordSize
+    #            ).split()
     
-    print(args_string)
-    # training_main(args_string)
+    # print(args_string)
+    training(trainingMatrices=pArgs.trainingMatrices, 
+             trainingChromosomes=pArgs.trainingChromosomes, 
+             trainingChromosomesFolders=pArgs.trainingChromosomesFolders, 
+             validationMatrices=pArgs.validationMatrices, 
+             validationChromosomes=pArgs.validationChromosomes, 
+             validationChromosomesFolders=pArgs.validationChromosomesFolders,
+             windowSize=pArgs.windowSize,
+             outputFolder=pArgs.outputFolder,
+             epochs=pArgs.epochs,
+             batchSize=pArgs.batchSize,
+             lossWeightPixel=config["loss_weight_pixel"],
+             lossWeightDiscriminator=config["loss_weight_discriminator"],
+             lossWeightAdversarial=config["loss_weight_adversarial"],
+             lossTypePixel=config["loss_type_pixel"],
+             lossWeightTV=config["loss_weight_tv"],
+             learningRateGenerator=config["learning_rate_generator"],
+             learningRateDiscriminator=config["learning_rate_discriminator"],
+             beta1=config["beta1"],
+             flipSamples=config["flip_samples"],
+             figureFileFormat="png",
+             recordSize=pArgs.recordSize,
+             plotFrequency=20)
 
-    # predictionChromosomesFoldersString = ' '.join(args.predictionChromosomesFolders)
-    predictionChromosomesString = ' '.join(args.predictionChromosomes)
+    # # predictionChromosomesFoldersString = ' '.join(args.predictionChromosomesFolders)
+    # predictionChromosomesString = ' '.join(pArgs.predictionChromosomes)
     
-    args_string_for_prediction = "--trainedModel {} --predictionChromosomesFolders {} \
-               --predictionChromosomes {} --matrixOutputName {} --parameterOutputFile {} \
-               --outputFolder {} --multiplier {} --binSize {} --windowSize {}".format(
-                   os.path.join(args.outputFolder, args.generatorName),  # --trainedModel
-                   args.predictionChromosomesFolders,  # --predictionChromosomesFolders
-                   predictionChromosomesString,  # --predictionChromosomes
-                   args.matrixOutputName,  # --matrixOutputName
-                   args.parameterOutputFile,  # --parameterOutputFile
-                   args.outputFolder,  # --outputFolder
-                   config["multiplier"],  # --multiplier
-                   args.binSize,  # --binSize
-                   args.windowSize
-               ).split()
-    print(args_string_for_prediction)
+    # args_string_for_prediction = "--trainedModel {} --predictionChromosomesFolders {} \
+    #            --predictionChromosomes {} --matrixOutputName {} --parameterOutputFile {} \
+    #            --outputFolder {} --multiplier {} --binSize {} --windowSize {}".format(
+    #                os.path.join(pArgs.outputFolder, pArgs.generatorName),  # --trainedModel
+    #                pArgs.predictionChromosomesFolders,  # --predictionChromosomesFolders
+    #                predictionChromosomesString,  # --predictionChromosomes
+    #                pArgs.matrixOutputName,  # --matrixOutputName
+    #                pArgs.parameterOutputFile,  # --parameterOutputFile
+    #                pArgs.outputFolder,  # --outputFolder
+    #                config["multiplier"],  # --multiplier
+    #                pArgs.binSize,  # --binSize
+    #                pArgs.windowSize
+    #            ).split()
+    # print(args_string_for_prediction)
     # Run args_string_for_prediction using the computed model
 
-    predict_main(args_string_for_prediction)
+    prediction(
+        pTrainedModel=os.path.join(pArgs.outputFolder, pArgs.generatorName),
+        pPredictionChromosomesFolders=pArgs.predictionChromosomesFolders,
+        pPredictionChromosomes=pArgs.predictionChromosomes,
+        pOutputFolder=pArgs.outputFolder,
+        pMultiplier=config["multiplier"],
+        pBinSize=pArgs.binSize,
+        pBatchSize=pArgs.batchSize,
+        pWindowSize=pArgs.windowSize,
+        pMatrixOutputName=pArgs.matrixOutputName,
+        pParameterOutputFile=pArgs.parameterOutputFile
+    )
     # Compute the Pearson correlation error
-    error = 0
-    test_chromosomes = args.testChromosomes.strip().split(" ")
-    for chrom in test_chromosomes:
-        error_dataframe = computePearsonCorrelation(pCoolerFile1=os.path.join(args.outputFolder, args.matrixOutputName), pCoolerFile2=args.originalDataMatrix,
-                                                pWindowsize_bp=args.correlationDepth, pModelChromList=args.trainingChromosomes.split(" "), pTargetChromStr=chrom,
-                                                pModelCellLineList=args.trainingCellType, pTargetCellLineStr=args.testCellType,
+    score = 0
+    # test_chromosomes = args.testChromosomes.split(" ")
+    for chrom in pArgs.testChromosomes:
+        score_dataframe = computePearsonCorrelation(pCoolerFile1=os.path.join(pArgs.outputFolder, pArgs.matrixOutputName), pCoolerFile2=pArgs.originalDataMatrix,
+                                                pWindowsize_bp=pArgs.correlationDepth, pModelChromList=pArgs.trainingChromosomes, pTargetChromStr=chrom,
+                                                pModelCellLineList=pArgs.trainingCellType, pTargetCellLineStr=pArgs.testCellType,
                                                 pPlotOutputFile=None, pCsvOutputFile=None)
-        error += error_dataframe.loc[args.correlationMethod, args.errorType]
-    error = error / len(test_chromosomes)
+        score += score_dataframe.loc[pArgs.correlationMethod, pArgs.errorType]
+    score = score / len(pArgs.testChromosomes)
+    print("Score: ", score)
     # Return the error as the objective value
-    tune.report(loss=1-error)
+    return {"score": score}
 
 def run_raytune(pArgs):
     # Create a ray tune experiment
@@ -223,14 +256,22 @@ def run_raytune(pArgs):
     
     # Define the objective function
     # objective = tune.function(objective_raytune)
-    objective_with_param = tune.with_parameters(objective_raytune, args=pArgs)
+    objective_with_param = tune.with_parameters(objective_raytune, pArgs=pArgs)
     objective_with_resources = tune.with_resources(objective_with_param, resources={"cpu": 16, "gpu": 2})
 
 
-    tuner = tune.Tuner(objective_with_param, param_space=search_space)  #
+    # tuner = tune.Tuner(objective_with_resources, param_space=search_space)  #
 
+    
+
+    tuner = tune.Tuner(
+        objective_with_resources, param_space=search_space, tune_config=tune.TuneConfig(num_samples=10)
+    )
     results = tuner.fit()
-    print(results.get_best_result(metric="score", mode="min").config)
+
+
+    print(results.get_best_result(metric="score", mode="max").config)
+
     
     
 
@@ -238,9 +279,8 @@ def run_raytune(pArgs):
 def run_opttuner():
     pass
 
-def main():
+def main(args=None):
     args = parse_arguments()
-    
     if args.optimizer == 'raytune':
         run_raytune(pArgs=args)
     elif args.optimizer == 'opttuner':

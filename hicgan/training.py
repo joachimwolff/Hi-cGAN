@@ -128,174 +128,8 @@ def training(trainingMatrices,
              flipSamples,
              figureFileFormat,
              recordSize,
-             plotFrequency, scope=None):
+             plotFrequency):
 
-    os.makedirs(outputFolder, exist_ok=True)
-    #few constants
-    # windowSize = int(windowSize)
-    debugstate = None
-    paramDict = locals().copy()
-
-    #remove spaces, commas and "chr" from the train and val chromosome lists
-    #ensure each chrom name is used only once, but allow the same chrom for train and validation
-    #sort the lists and write to param dict
-    # trainChromNameList = trainingChromosomes.replace(",","")
-    # trainChromNameList = trainChromNameList.rstrip().split(" ")  
-    trainChromNameList = [x.lstrip("chr") for x in trainingChromosomes]
-    trainChromNameList = sorted(list(set(trainChromNameList)))
-    paramDict["trainChromNameList"] = trainChromNameList
-    # valChromNameList = validationChromosomes.replace(",","")
-    # valChromNameList = valChromNameList.rstrip().split(" ")
-    valChromNameList = [x.lstrip("chr") for x in validationChromosomes]
-    valChromNameList = sorted(list(set(valChromNameList)))
-    paramDict["valChromNameList"] = valChromNameList
-
-    #ensure there are as many matrices as chromatin paths
-    if len(trainingMatrices) != len(trainingChromosomesFolders):
-        msg = "Number of train matrices and chromatin paths must match\n"
-        msg += "Current numbers: Matrices: {:d}; Chromatin Paths: {:d}"
-        msg = msg.format(len(trainingMatrices), len(trainingChromosomesFolders))
-        raise SystemExit(msg)
-    if len(validationMatrices) != len(validationChromosomesFolders):
-        msg = "Number of validation matrices and chromatin paths must match\n"
-        msg += "Current numbers: Matrices: {:d}; Chromatin Paths: {:d}"
-        msg = msg.format(len(validationMatrices), len(validationChromosomesFolders))
-        raise SystemExit(msg)
-
-    #prepare the training data containers. No data is loaded yet.
-    traindataContainerList = []
-
-    
-
-    with concurrent.futures.ProcessPoolExecutor() as executor:
-        for chrom in trainChromNameList:
-            for matrix, chromatinpath in zip(trainingMatrices, trainingChromosomesFolders):
-                future = executor.submit(create_container, chrom, matrix, chromatinpath)
-                traindataContainerList.append(future.result())
-
-    #prepare the validation data containers. No data is loaded yet.
-    valdataContainerList = []
-
-    with concurrent.futures.ProcessPoolExecutor() as executor:
-        for chrom in valChromNameList:
-            for matrix, chromatinpath in zip(validationMatrices, validationChromosomesFolders):
-                future = executor.submit(create_container, chrom, matrix, chromatinpath)
-                valdataContainerList.append(future.result())
-
-    #define the load params for the containers
-    loadParams = {"scaleFeatures": True,
-                  "clampFeatures": False,
-                  "scaleTargets": True,
-                  "windowSize": windowSize,
-                  "flankingSize": windowSize,
-                  "maximumDistance": None}
-    #now load the data and write TFRecords, one container at a time.
-    if len(traindataContainerList) == 0:
-        msg = "Exiting. No data found"
-        print(msg)
-        return #nothing to do
-    container0 = traindataContainerList[0]
-    tfRecordFilenames = []
-    nr_samples_list = []
-    for container in traindataContainerList + valdataContainerList:
-        container.loadData(**loadParams)
-        if not container0.checkCompatibility(container):
-            msg = "Aborting. Incompatible data"
-            raise SystemExit(msg)
-        tfRecordFilenames.append(container.writeTFRecord(pOutputFolder=outputFolder,
-                                                        pRecordSize=recordSize))
-        if debugstate is not None:
-            if isinstance(debugstate, int):
-                idx = debugstate
-            else:
-                idx = None
-            container.plotFeatureAtIndex(idx=idx,
-                                         outpath=outputFolder,
-                                         figureFileFormat=figureFileFormat)
-            container.saveMatrix(outputpath=outputFolder, index=idx)
-        nr_samples_list.append(container.getNumberSamples())
-    #data is no longer needed
-    for container in traindataContainerList + valdataContainerList:
-        container.unloadData()
-    traindataRecords = [item for sublist in tfRecordFilenames[0:len(traindataContainerList)] for item in sublist]
-    valdataRecords = [item for sublist in tfRecordFilenames[len(traindataContainerList):] for item in sublist]
-
-    #different binSizes are ok
-    #not clear which binSize to use for prediction when they differ during training.
-    #For now, store the max. 
-    binSize = max([container.binSize for container in traindataContainerList])
-    paramDict["binSize"] = binSize
-    #because of compatibility checks above, 
-    #the following properties are the same with all containers,
-    #so just use data from first container
-    nr_factors = container0.nr_factors
-    paramDict["nr_factors"] = nr_factors
-    for i in range(nr_factors):
-        paramDict["chromFactor_" + str(i)] = container0.factorNames[i]
-    nr_trainingSamples = sum(nr_samples_list[0:len(traindataContainerList)])
-    storedFeaturesDict = container0.storedFeatures
-
-    #save the training parameters to a file before starting to train
-    #(allows recovering the parameters even if training is aborted
-    # and only intermediate models are available)
-    parameterFile = os.path.join(outputFolder, "trainParams.csv")    
-    with open(parameterFile, "w") as csvfile:
-        dictWriter = csv.DictWriter(csvfile, fieldnames=sorted(list(paramDict.keys())))
-        dictWriter.writeheader()
-        dictWriter.writerow(paramDict)
-
-    #build the input streams for training
-    shuffleBufferSize = 3*recordSize
-    trainDs = tf.data.TFRecordDataset(traindataRecords, 
-                                        num_parallel_reads=tf.data.experimental.AUTOTUNE,
-                                        compression_type="GZIP")
-    trainDs = trainDs.map(lambda x: records.parse_function(x, storedFeaturesDict), num_parallel_calls=tf.data.experimental.AUTOTUNE)
-    if flipSamples:
-        flippedDs = trainDs.map(lambda a,b: records.mirror_function(a["factorData"], b["out_matrixData"]))
-        trainDs = trainDs.concatenate(flippedDs)
-    trainDs = trainDs.shuffle(buffer_size=shuffleBufferSize, reshuffle_each_iteration=True)
-    trainDs = trainDs.batch(batchSize, drop_remainder=True)
-    trainDs = trainDs.prefetch(tf.data.experimental.AUTOTUNE)
-    #build the input streams for validation
-    validationDs = tf.data.TFRecordDataset(valdataRecords, 
-                                            num_parallel_reads=tf.data.experimental.AUTOTUNE,
-                                            compression_type="GZIP")
-    validationDs = validationDs.map(lambda x: records.parse_function(x, storedFeaturesDict) , num_parallel_calls=tf.data.experimental.AUTOTUNE)
-    validationDs = validationDs.batch(batchSize)
-    validationDs = validationDs.prefetch(tf.data.experimental.AUTOTUNE)
-    
-    steps_per_epoch = int( np.floor(nr_trainingSamples / batchSize) )
-    if flipSamples:
-        steps_per_epoch *= 2
-
-    hicGanModel = hicGAN.HiCGAN(log_dir=outputFolder, 
-                                    number_factors=nr_factors,
-                                    loss_weight_pixel=lossWeightPixel,
-                                    loss_weight_adversarial=lossWeightAdversarial,
-                                    loss_weight_discriminator=lossWeightDiscriminator, 
-                                    loss_type_pixel=lossTypePixel, 
-                                    loss_weight_tv=lossWeightTV, 
-                                    input_size=windowSize,
-                                    learning_rate_generator=learningRateGenerator,
-                                    learning_rate_discriminator=learningRateDiscriminator,
-                                    adam_beta_1=beta1,
-                                    plot_type=figureFileFormat,
-                                    plot_frequency=plotFrequency,
-                                    scope=scope)
-    
-    hicGanModel.plotModels(pOutputPath=outputFolder, pFigureFileFormat=figureFileFormat)
-
-    log.info("Starting training at %s" % datetime.now())
-    hicGanModel.fit(train_ds=trainDs, epochs=epochs, test_ds=validationDs, steps_per_epoch=steps_per_epoch)
-    log.info("Training finished at %s" % datetime.now())
-    log.info("Cleaning up temporary files...")
-    for tfRecordfile in traindataRecords + valdataRecords:
-        if os.path.exists(tfRecordfile):
-            os.remove(tfRecordfile)
-
-def main(args=None):
-    args = parse_arguments().parse_args(args)
-    print(args)
     gpu = tf.config.list_physical_devices('GPU')
     if gpu:
         try:
@@ -303,6 +137,177 @@ def main(args=None):
                 tf.config.experimental.set_memory_growth(gpu_device, True)
         except Exception as e:
             print("Error: {}".format(e))
+    strategy = tf.distribute.MirroredStrategy()
+
+    with strategy.scope() as scope: 
+
+        os.makedirs(outputFolder, exist_ok=True)
+        #few constants
+        # windowSize = int(windowSize)
+        debugstate = None
+        paramDict = locals().copy()
+
+        #remove spaces, commas and "chr" from the train and val chromosome lists
+        #ensure each chrom name is used only once, but allow the same chrom for train and validation
+        #sort the lists and write to param dict
+        # trainChromNameList = trainingChromosomes.replace(",","")
+        # trainChromNameList = trainChromNameList.rstrip().split(" ")  
+        trainChromNameList = [x.lstrip("chr") for x in trainingChromosomes]
+        trainChromNameList = sorted(list(set(trainChromNameList)))
+        paramDict["trainChromNameList"] = trainChromNameList
+        # valChromNameList = validationChromosomes.replace(",","")
+        # valChromNameList = valChromNameList.rstrip().split(" ")
+        valChromNameList = [x.lstrip("chr") for x in validationChromosomes]
+        valChromNameList = sorted(list(set(valChromNameList)))
+        paramDict["valChromNameList"] = valChromNameList
+
+        #ensure there are as many matrices as chromatin paths
+        if len(trainingMatrices) != len(trainingChromosomesFolders):
+            msg = "Number of train matrices and chromatin paths must match\n"
+            msg += "Current numbers: Matrices: {:d}; Chromatin Paths: {:d}"
+            msg = msg.format(len(trainingMatrices), len(trainingChromosomesFolders))
+            raise SystemExit(msg)
+        if len(validationMatrices) != len(validationChromosomesFolders):
+            msg = "Number of validation matrices and chromatin paths must match\n"
+            msg += "Current numbers: Matrices: {:d}; Chromatin Paths: {:d}"
+            msg = msg.format(len(validationMatrices), len(validationChromosomesFolders))
+            raise SystemExit(msg)
+
+        #prepare the training data containers. No data is loaded yet.
+        traindataContainerList = []
+
+        
+
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            for chrom in trainChromNameList:
+                for matrix, chromatinpath in zip(trainingMatrices, trainingChromosomesFolders):
+                    future = executor.submit(create_container, chrom, matrix, chromatinpath)
+                    traindataContainerList.append(future.result())
+
+        #prepare the validation data containers. No data is loaded yet.
+        valdataContainerList = []
+
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            for chrom in valChromNameList:
+                for matrix, chromatinpath in zip(validationMatrices, validationChromosomesFolders):
+                    future = executor.submit(create_container, chrom, matrix, chromatinpath)
+                    valdataContainerList.append(future.result())
+
+        #define the load params for the containers
+        loadParams = {"scaleFeatures": True,
+                    "clampFeatures": False,
+                    "scaleTargets": True,
+                    "windowSize": windowSize,
+                    "flankingSize": windowSize,
+                    "maximumDistance": None}
+        #now load the data and write TFRecords, one container at a time.
+        if len(traindataContainerList) == 0:
+            msg = "Exiting. No data found"
+            print(msg)
+            return #nothing to do
+        container0 = traindataContainerList[0]
+        tfRecordFilenames = []
+        nr_samples_list = []
+        for container in traindataContainerList + valdataContainerList:
+            container.loadData(**loadParams)
+            if not container0.checkCompatibility(container):
+                msg = "Aborting. Incompatible data"
+                raise SystemExit(msg)
+            tfRecordFilenames.append(container.writeTFRecord(pOutputFolder=outputFolder,
+                                                            pRecordSize=recordSize))
+            if debugstate is not None:
+                if isinstance(debugstate, int):
+                    idx = debugstate
+                else:
+                    idx = None
+                container.plotFeatureAtIndex(idx=idx,
+                                            outpath=outputFolder,
+                                            figureFileFormat=figureFileFormat)
+                container.saveMatrix(outputpath=outputFolder, index=idx)
+            nr_samples_list.append(container.getNumberSamples())
+        #data is no longer needed
+        for container in traindataContainerList + valdataContainerList:
+            container.unloadData()
+        traindataRecords = [item for sublist in tfRecordFilenames[0:len(traindataContainerList)] for item in sublist]
+        valdataRecords = [item for sublist in tfRecordFilenames[len(traindataContainerList):] for item in sublist]
+
+        #different binSizes are ok
+        #not clear which binSize to use for prediction when they differ during training.
+        #For now, store the max. 
+        binSize = max([container.binSize for container in traindataContainerList])
+        paramDict["binSize"] = binSize
+        #because of compatibility checks above, 
+        #the following properties are the same with all containers,
+        #so just use data from first container
+        nr_factors = container0.nr_factors
+        paramDict["nr_factors"] = nr_factors
+        for i in range(nr_factors):
+            paramDict["chromFactor_" + str(i)] = container0.factorNames[i]
+        nr_trainingSamples = sum(nr_samples_list[0:len(traindataContainerList)])
+        storedFeaturesDict = container0.storedFeatures
+
+        #save the training parameters to a file before starting to train
+        #(allows recovering the parameters even if training is aborted
+        # and only intermediate models are available)
+        parameterFile = os.path.join(outputFolder, "trainParams.csv")    
+        with open(parameterFile, "w") as csvfile:
+            dictWriter = csv.DictWriter(csvfile, fieldnames=sorted(list(paramDict.keys())))
+            dictWriter.writeheader()
+            dictWriter.writerow(paramDict)
+
+        #build the input streams for training
+        shuffleBufferSize = 3*recordSize
+        trainDs = tf.data.TFRecordDataset(traindataRecords, 
+                                            num_parallel_reads=tf.data.experimental.AUTOTUNE,
+                                            compression_type="GZIP")
+        trainDs = trainDs.map(lambda x: records.parse_function(x, storedFeaturesDict), num_parallel_calls=tf.data.experimental.AUTOTUNE)
+        if flipSamples:
+            flippedDs = trainDs.map(lambda a,b: records.mirror_function(a["factorData"], b["out_matrixData"]))
+            trainDs = trainDs.concatenate(flippedDs)
+        trainDs = trainDs.shuffle(buffer_size=shuffleBufferSize, reshuffle_each_iteration=True)
+        trainDs = trainDs.batch(batchSize, drop_remainder=True)
+        trainDs = trainDs.prefetch(tf.data.experimental.AUTOTUNE)
+        #build the input streams for validation
+        validationDs = tf.data.TFRecordDataset(valdataRecords, 
+                                                num_parallel_reads=tf.data.experimental.AUTOTUNE,
+                                                compression_type="GZIP")
+        validationDs = validationDs.map(lambda x: records.parse_function(x, storedFeaturesDict) , num_parallel_calls=tf.data.experimental.AUTOTUNE)
+        validationDs = validationDs.batch(batchSize)
+        validationDs = validationDs.prefetch(tf.data.experimental.AUTOTUNE)
+        
+        steps_per_epoch = int( np.floor(nr_trainingSamples / batchSize) )
+        if flipSamples:
+            steps_per_epoch *= 2
+
+        hicGanModel = hicGAN.HiCGAN(log_dir=outputFolder, 
+                                        number_factors=nr_factors,
+                                        loss_weight_pixel=lossWeightPixel,
+                                        loss_weight_adversarial=lossWeightAdversarial,
+                                        loss_weight_discriminator=lossWeightDiscriminator, 
+                                        loss_type_pixel=lossTypePixel, 
+                                        loss_weight_tv=lossWeightTV, 
+                                        input_size=windowSize,
+                                        learning_rate_generator=learningRateGenerator,
+                                        learning_rate_discriminator=learningRateDiscriminator,
+                                        adam_beta_1=beta1,
+                                        plot_type=figureFileFormat,
+                                        plot_frequency=plotFrequency,
+                                        scope=scope)
+        
+        hicGanModel.plotModels(pOutputPath=outputFolder, pFigureFileFormat=figureFileFormat)
+
+        log.info("Starting training at %s" % datetime.now())
+        hicGanModel.fit(train_ds=trainDs, epochs=epochs, test_ds=validationDs, steps_per_epoch=steps_per_epoch)
+        log.info("Training finished at %s" % datetime.now())
+        log.info("Cleaning up temporary files...")
+        for tfRecordfile in traindataRecords + valdataRecords:
+            if os.path.exists(tfRecordfile):
+                os.remove(tfRecordfile)
+
+def main(args=None):
+    args = parse_arguments().parse_args(args)
+    # print(args)
+    
 
     
     for matrix in args.trainingMatrices + args.validationMatrices:
@@ -339,36 +344,31 @@ def main(args=None):
     
     # for i, (training_matrices, validation_matrices) in enumerate(zip(matrix_resolutions_training, matrix_resolutions_validation)):
 
-    strategy = tf.distribute.MirroredStrategy()
-
-
-
-    with strategy.scope() as scope: 
-        training(
-            trainingMatrices=args.trainingMatrices,
-            trainingChromosomes=args.trainingChromosomes,
-            trainingChromosomesFolders=args.trainingChromosomesFolders,
-            validationMatrices=args.validationMatrices,
-            validationChromosomes=args.validationChromosomes,
-            validationChromosomesFolders=args.validationChromosomesFolders,
-            windowSize=args.windowSize,
-            outputFolder=args.outputFolder,
-            epochs=args.epochs,
-            batchSize=args.batchSize,
-            lossWeightPixel=args.lossWeightPixel,
-            lossWeightDiscriminator=args.lossWeightDiscriminator,
-            lossWeightAdversarial=args.lossWeightAdversarial,
-            lossTypePixel=args.lossTypePixel,
-            lossWeightTV=args.lossWeightTV,
-            learningRateGenerator=args.learningRateGenerator,
-            learningRateDiscriminator=args.learningRateDiscriminator,
-            beta1=args.beta1,
-            flipSamples=args.flipSamples,
-            figureFileFormat=args.figureFileFormat,
-            recordSize=args.recordSize,
-            plotFrequency=args.plotFrequency,
-            scope=scope
-        )  # pylint: disable=no-value-for-parameter
+    
+    training(
+        trainingMatrices=args.trainingMatrices,
+        trainingChromosomes=args.trainingChromosomes,
+        trainingChromosomesFolders=args.trainingChromosomesFolders,
+        validationMatrices=args.validationMatrices,
+        validationChromosomes=args.validationChromosomes,
+        validationChromosomesFolders=args.validationChromosomesFolders,
+        windowSize=args.windowSize,
+        outputFolder=args.outputFolder,
+        epochs=args.epochs,
+        batchSize=args.batchSize,
+        lossWeightPixel=args.lossWeightPixel,
+        lossWeightDiscriminator=args.lossWeightDiscriminator,
+        lossWeightAdversarial=args.lossWeightAdversarial,
+        lossTypePixel=args.lossTypePixel,
+        lossWeightTV=args.lossWeightTV,
+        learningRateGenerator=args.learningRateGenerator,
+        learningRateDiscriminator=args.learningRateDiscriminator,
+        beta1=args.beta1,
+        flipSamples=args.flipSamples,
+        figureFileFormat=args.figureFileFormat,
+        recordSize=args.recordSize,
+        plotFrequency=args.plotFrequency
+    )  # pylint: disable=no-value-for-parameter
 
     
     # with h5py.File(os.path.join(args.outputFolder, 'trainedModel.hdf'), 'w') as hdf5_file:

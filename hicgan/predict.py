@@ -56,15 +56,15 @@ def parse_arguments(args=None):
                            version='%(prog)s {}'.format(__version__))
     return parser.parse_args()
 
-def prediction(args):
-    trainedmodel = args.trainedModel
-    predictionChromosomesFolders = args.predictionChromosomesFolders
-    predictionChromosomes = args.predictionChromosomes
-    outputFolder = args.outputFolder
-    multiplier = args.multiplier
-    binSize = args.binSize
-    batchSize = args.batchSize
-    windowSize = args.windowSize
+def prediction(pTrainedModel, pPredictionChromosomesFolders, pPredictionChromosomes, pOutputFolder, pMultiplier, pBinSize, pBatchSize, pWindowSize, pMatrixOutputName, pParameterOutputFile):
+    trainedmodel = pTrainedModel
+    predictionChromosomesFolders = pPredictionChromosomesFolders
+    predictionChromosomes = pPredictionChromosomes
+    outputFolder = pOutputFolder
+    multiplier = pMultiplier
+    binSize = pBinSize
+    batchSize = pBatchSize
+    windowSize = pWindowSize
 
     if not os.path.exists(outputFolder):
         os.mkdir(outputFolder)
@@ -77,8 +77,6 @@ def prediction(args):
 
     paramDict = locals().copy()
         
-    #extract chromosome names from the input
-    # chromNameList = predictionChromosomes.replace(",", " ").rstrip().split(" ")  
     chromNameList = sorted([x.lstrip("chr") for x in predictionChromosomes])
     
     containerCls = dataContainer.DataContainer
@@ -88,18 +86,16 @@ def prediction(args):
                                                   matrixFilePath=None,
                                                   chromatinFolder=predictionChromosomesFolders,
                                                   binSize=binSize)) 
-    #define the load params for the containers
     loadParams = {"scaleFeatures": scalefactors,
                   "clampFeatures": clampfactors,
                   "scaleTargets": scalematrix,
                   "windowSize": windowSize,
                   "flankingSize": flankingsize,
                   "maximumDistance": maxdist}
-    #now load the data and write TFRecords, one container at a time.
     if len(testdataContainerList) == 0:
         msg = "Exiting. No data found"
         print(msg)
-        return #nothing to do
+        return
     container0 = testdataContainerList[0]
     nr_factors = container0.nr_factors
     tfRecordFilenames = []
@@ -110,11 +106,10 @@ def prediction(args):
             msg = "Aborting. Incompatible data"
             raise SystemExit(msg)
         tfRecordFilenames.append(container.writeTFRecord(pOutputFolder=outputFolder,
-                                                        pRecordSize=None)[0]) #list with 1 entry
-        sampleSizeList.append( int( np.ceil(container.getNumberSamples() / batchSize) ) )
+                                                        pRecordSize=None)[0])
+        sampleSizeList.append(int(np.ceil(container.getNumberSamples() / batchSize)))
     
     nr_factors = container0.nr_factors
-    #data is no longer needed, unload it
     for container in testdataContainerList:
         container.unloadData() 
 
@@ -127,18 +122,16 @@ def prediction(args):
                                             num_parallel_reads=None,
                                             compression_type="GZIP")
         testDs = testDs.map(lambda x: records.parse_function(x, storedFeaturesDict), num_parallel_calls=tf.data.experimental.AUTOTUNE)
-        testDs = testDs.batch(batchSize, drop_remainder=False) #do NOT drop the last batch (maybe incomplete, i.e. smaller, because batch size doesn't integer divide chrom size)
-        #if validationmatrix is not None:
-        #    testDs = testDs.map(lambda x, y: x) #drop the target matrices (they are for evaluation)
+        testDs = testDs.batch(batchSize, drop_remainder=False)
         testDs = testDs.prefetch(tf.data.experimental.AUTOTUNE)
         predArray = trained_GAN.predict(test_ds=testDs, steps_per_record=nr_samples)
         triu_indices = np.triu_indices(windowSize)
-        predArray = np.array( [np.array(x[triu_indices]) for x in predArray] )
+        predArray = np.array([np.array(x[triu_indices]) for x in predArray])
         predList.append(predArray)
     predList = [utils.rebuildMatrix(pArrayOfTriangles=x, pWindowSize=windowSize, pFlankingSize=windowSize) for x in predList]
     predList = [utils.scaleArray(x) * multiplier for x in predList]
 
-    matrixname = os.path.join(outputFolder, args.matrixOutputName)
+    matrixname = os.path.join(outputFolder, pMatrixOutputName)
     log.info("Writing predicted matrix to disk on %s..." % matrixname)   
 
     utils.writeCooler(pMatrixList=predList, 
@@ -146,7 +139,7 @@ def prediction(args):
                       pOutfile=matrixname, 
                       pChromosomeList=chromNameList)
 
-    parameterFile = os.path.join(outputFolder, args.parameterOutputFile) 
+    parameterFile = os.path.join(outputFolder, pParameterOutputFile) 
     with open(parameterFile, "w") as csvfile:
         dictWriter = csv.DictWriter(csvfile, fieldnames=sorted(list(paramDict.keys())))
         dictWriter.writeheader()
@@ -160,4 +153,5 @@ def prediction(args):
 
 def main(args=None):
     args = parse_arguments().parse_args(args)
+    # print(args)
     prediction(args)
