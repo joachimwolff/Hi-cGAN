@@ -125,7 +125,7 @@ def scaleArray(pArray):
 def showMatrix(pMatrix):
     #test function to show matrices
     #debug only, not for production use
-    print(pMatrix.max())
+    # print(pMatrix.max())
     plotmatrix = pMatrix + 1
     plt.matshow(plotmatrix, cmap="Reds", norm=colors.LogNorm())
     plt.show()
@@ -521,8 +521,8 @@ def computePearsonCorrelationSparse(pSparseCsrMatrix1, pSparseCsrMatrix2,
     pearsonAucScore = metrics.auc(pearsonAucIndices, pearsonAucValues)
     spearmanAucIncides, spearmanAucValues = getCorrelation(matrixDf,'distance', 'reads1', 'reads2', 'spearman')
     spearmanAucScore = metrics.auc(spearmanAucIncides, spearmanAucValues)
-    print("PearsonAUC: {:.3f}".format(pearsonAucScore))
-    print("SpearmanAUC: {:.3f}".format(spearmanAucScore))
+    # print("PearsonAUC: {:.3f}".format(pearsonAucScore))
+    # print("SpearmanAUC: {:.3f}".format(spearmanAucScore))
 
     columns = ["corrMeth", "modelChroms", "targetChrom", 
                            "modelCellLines", "targetCellLine", 
@@ -697,9 +697,9 @@ def getCorrelation(pData, pDistanceField, pTargetField, pPredictionField, pCorrM
     values = correlation_values.values
 
     # Print statements for debugging
-    print(correlation_matrix)
-    print(correlation_values)
-    print(indices, values)
+    # print(correlation_matrix)
+    # print(correlation_values)
+    # print(indices, values)
 
     # Return the final indices and values
     return indices, values
