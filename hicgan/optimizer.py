@@ -14,7 +14,7 @@ from ray.tune.search.optuna import OptunaSearch
 
 import logging
 from hicgan._version import __version__
-from hicgan.training import training
+from hicgan.training import training, create_data, delete_model_files
 from hicgan.predict import prediction
 from hicgan.lib.utils import computePearsonCorrelation
 
@@ -121,67 +121,85 @@ def parse_arguments(args=None):
                         type=str,
                         default="generator_00099.keras",
                         help="Name of the generator model file.")
+    parser.add_argument("--numberSamples", "-ns", required=False,
+                        type=int, default=1,
+                        help="Number of samples for the optimizer.")
+    parser.add_argument("--iterations", "-it", required=False,
+                        type=int, default=10,
+                        help="Number of iterations for the optimizer.")
+    parser.add_argument("--threads", '-t', required=False,
+                        type=int, default=16,
+                        help="Number of CPU threads to use.")
+    parser.add_argument("--gpu", '-g', required=False,
+                        type=int, default=2,
+                        help="Number of GPUs to use.")
     parser.add_argument('--version', action='version',
                            version='%(prog)s {}'.format(__version__))
     return parser.parse_args()
 
 
 
-def objective_raytune(config, pArgs, pSteps):
+def objective_raytune(config, pArgs, pTfRecordFilenames=None, pTraindataContainerListLength=None, pNrSamplesList=None, pStoredFeatures=None, pNrFactors=None):
 
-    for step in range(pSteps):
+    gpu = tf.config.list_physical_devices('GPU')
+    if gpu:
+        try:
+            for gpu_device in gpu:
+                tf.config.experimental.set_memory_growth(gpu_device, True)
+        except Exception as e:
+            print("Error: {}".format(e))
+    strategy = tf.distribute.MirroredStrategy()
 
-        training(trainingMatrices=pArgs.trainingMatrices, 
-                trainingChromosomes=pArgs.trainingChromosomes, 
-                trainingChromosomesFolders=pArgs.trainingChromosomesFolders, 
-                validationMatrices=pArgs.validationMatrices, 
-                validationChromosomes=pArgs.validationChromosomes, 
-                validationChromosomesFolders=pArgs.validationChromosomesFolders,
-                windowSize=pArgs.windowSize,
-                outputFolder=pArgs.outputFolder,
-                epochs=pArgs.epochs,
-                batchSize=pArgs.batchSize,
-                lossWeightPixel=config["loss_weight_pixel"],
-                lossWeightDiscriminator=config["loss_weight_discriminator"],
-                lossWeightAdversarial=config["loss_weight_adversarial"],
-                lossTypePixel=config["loss_type_pixel"],
-                lossWeightTV=config["loss_weight_tv"],
-                learningRateGenerator=config["learning_rate_generator"],
-                learningRateDiscriminator=config["learning_rate_discriminator"],
-                beta1=config["beta1"],
-                flipSamples=config["flip_samples"],
-                figureFileFormat="png",
-                recordSize=pArgs.recordSize,
-                plotFrequency=20)
-
-        
-        prediction(
-            pTrainedModel=os.path.join(pArgs.outputFolder, pArgs.generatorName),
-            pPredictionChromosomesFolders=pArgs.predictionChromosomesFolders,
-            pPredictionChromosomes=pArgs.predictionChromosomes,
-            pOutputFolder=pArgs.outputFolder,
-            pMultiplier=config["multiplier"],
-            pBinSize=pArgs.binSize,
-            pBatchSize=pArgs.batchSize,
+    with strategy.scope() as scope: 
+        training(
+            pTfRecordFilenames=pTfRecordFilenames,
+            pLengthTrainDataContainerList=pTraindataContainerListLength,
             pWindowSize=pArgs.windowSize,
-            pMatrixOutputName=pArgs.matrixOutputName,
-            pParameterOutputFile=pArgs.parameterOutputFile
+            pOutputFolder=pArgs.outputFolder,
+            pEpochs=pArgs.epochs,
+            pBatchSize=pArgs.batchSize,
+            pLossWeightPixel=config["loss_weight_pixel"],
+            pLossWeightDiscriminator=config["loss_weight_discriminator"],
+            pLossWeightAdversarial=config["loss_weight_adversarial"],
+            pLossTypePixel=config["loss_type_pixel"],
+            pLossWeightTV=config["loss_weight_tv"],
+            pLearningRateGenerator=config["learning_rate_generator"],
+            pLearningRateDiscriminator=config["learning_rate_discriminator"],
+            pBeta1=config["beta1"],
+            pFigureFileFormat="png",
+            pPlotFrequency=20,
+            pScope=scope,
+            pStoredFeaturesDict=pStoredFeatures,
+            pNumberSamplesList=pNrSamplesList,
+            pNumberOfFactors=pNrFactors, 
+            pFlipSamples=config["flip_samples"],
+            pRecordSize=pArgs.recordSize
         )
-        # Compute the Pearson correlation error
-        score = 0
-        # test_chromosomes = args.testChromosomes.split(" ")
-        for chrom in pArgs.testChromosomes:
-            score_dataframe = computePearsonCorrelation(pCoolerFile1=os.path.join(pArgs.outputFolder, pArgs.matrixOutputName), pCoolerFile2=pArgs.originalDataMatrix,
+
+    prediction(
+        pTrainedModel=os.path.join(pArgs.outputFolder, pArgs.generatorName),
+        pPredictionChromosomesFolders=pArgs.predictionChromosomesFolders,
+        pPredictionChromosomes=pArgs.predictionChromosomes,
+        pOutputFolder=pArgs.outputFolder,
+        pMultiplier=config["multiplier"],
+        pBinSize=pArgs.binSize,
+        pBatchSize=pArgs.batchSize,
+        pWindowSize=pArgs.windowSize,
+        pMatrixOutputName=pArgs.matrixOutputName,
+        pParameterOutputFile=pArgs.parameterOutputFile
+    )
+
+    score = 0
+    for chrom in pArgs.testChromosomes:
+        score_dataframe = computePearsonCorrelation(pCoolerFile1=os.path.join(pArgs.outputFolder, pArgs.matrixOutputName), pCoolerFile2=pArgs.originalDataMatrix,
                                                     pWindowsize_bp=pArgs.correlationDepth, pModelChromList=pArgs.trainingChromosomes, pTargetChromStr=chrom,
                                                     pModelCellLineList=pArgs.trainingCellType, pTargetCellLineStr=pArgs.testCellType,
                                                     pPlotOutputFile=None, pCsvOutputFile=None)
-            score += score_dataframe.loc[pArgs.correlationMethod, pArgs.errorType]
-        score = score / len(pArgs.testChromosomes)
+        score += score_dataframe.loc[pArgs.correlationMethod, pArgs.errorType]
+    score = score / len(pArgs.testChromosomes)
 
-        print("mean_loss: ", 1-score)
-        # Return the error as the objective value
-        # train.report({"score": score})
-        train.report({"iterations": step, "mean_loss": 1-score})
+    print("accuracy: ", score)
+    train.report({"accuracy": score})
 
 #  {"score": score}
 
@@ -216,12 +234,31 @@ def run_raytune(pArgs):
             "multiplier": 100
         }
     ]
-    # Define the objective function
-    # objective = tune.function(objective_raytune)
-    objective_with_param = tune.with_parameters(objective_raytune, pArgs=pArgs, pSteps=10)
-    objective_with_resources = tune.with_resources(objective_with_param, resources={"cpu": 16, "gpu": 2})
-    search_algorithm = OptunaSearch(metric="mean_loss", 
-                                    mode="min",
+
+    
+    tfRecordFilenames, traindataContainerListLength, nr_samples_list, storedFeatures, nr_factors = create_data(
+        pTrainingMatrices=pArgs.trainingMatrices, 
+        pTrainingChromosomes=pArgs.trainingChromosomes, 
+        pTrainingChromosomesFolders=pArgs.trainingChromosomesFolders, 
+        pValidationMatrices=pArgs.validationMatrices, 
+        pValidationChromosomes=pArgs.validationChromosomes, 
+        pValidationChromosomesFolders=pArgs.validationChromosomesFolders,
+        pWindowSize=pArgs.windowSize,
+        pOutputFolder=pArgs.outputFolder,
+        pBatchSize=pArgs.batchSize,
+        pFlipSamples=False,
+        pFigureFileFormat="png",
+        pRecordSize=pArgs.recordSize
+    )
+      
+        # Define the objective function
+        # objective = tune.function(objective_raytune)
+    objective_with_param = tune.with_parameters(objective_raytune, pArgs=pArgs, pTfRecordFilenames=tfRecordFilenames, pTraindataContainerListLength=traindataContainerListLength, pNrSamplesList=nr_samples_list, pStoredFeatures=storedFeatures, pNrFactors=nr_factors)
+    # objective_with_param = tune.with_parameters(objective_raytune, pArgs=pArgs, pTfRecordFilenames=None, pTraindataContainerListLength=None, pNrSamplesList=None, pStoredFeatures=None, pNrFactors=None, pScope=scope)
+    
+    objective_with_resources = tune.with_resources(objective_with_param, resources={"cpu": pArgs.threads, "gpu": pArgs.gpu})
+    search_algorithm = OptunaSearch(metric="accuracy", 
+                                    mode="max",
                                     points_to_evaluate=points_to_evaluate)
 
     # tuner = tune.Tuner(objective_with_resources, param_space=search_space)  #
@@ -231,13 +268,15 @@ def run_raytune(pArgs):
     tuner = tune.Tuner(
         objective_with_resources, 
         param_space=search_space, 
-        tune_config=tune.TuneConfig(num_samples=1,
+        tune_config=tune.TuneConfig(num_samples=pArgs.numberSamples,
                                     search_alg=search_algorithm),
     )
     results = tuner.fit()
 
 
-    print(results.get_best_result(metric="mean_loss", mode="min").config)
+    print(results.get_best_result(metric="accuracy", mode="max").config)
+
+    delete_model_files(pTFRecordFiles=tfRecordFilenames)
 
     
     

@@ -11,3 +11,6 @@ scikit-learn
 scipy
 tensorflow-gpu  
 tqdm
+optuna
+icecream
+ray-tune
