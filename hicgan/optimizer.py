@@ -256,7 +256,7 @@ depth = 2000000
 transform = log1p
 file_type = hic_matrix
 show_masked_bins = false
-""".format(os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), pArgs.originalDataMatrix, score, pArgs.cellType)
+""".format(os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), pArgs.originalDataMatrix, score, pArgs.trainingCellType)
         
         tracks_path = os.path.join(pArgs.outputFolder, trial_id, "browser_tracks_hic.ini")
         with open(tracks_path, 'w') as fh:
