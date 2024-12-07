@@ -244,7 +244,7 @@ def objective(config, pArgs, pTfRecordFilenames=None, pTraindataContainerListLen
 [hic matrix]
 file = {0}
 title = predicted score {2}
-depth = 2000000
+depth = 3000000
 transform = log1p
 file_type = hic_matrix
 show_masked_bins = false
@@ -252,10 +252,11 @@ show_masked_bins = false
 [hic matrix]
 file = {1}
 title = original matrix {3}
-depth = 2000000
+depth = 3000000
 transform = log1p
 file_type = hic_matrix
 show_masked_bins = false
+orientation = inverted
 """.format(os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), pArgs.originalDataMatrix, score, pArgs.trainingCellType)
         
         tracks_path = os.path.join(pArgs.outputFolder, trial_id, "browser_tracks_hic.ini")
