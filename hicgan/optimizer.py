@@ -1,7 +1,6 @@
 import argparse
 import numpy as np
 import os
-import csv
 import tensorflow as tf
 from .lib import dataContainer
 from .lib import records
@@ -9,13 +8,14 @@ from .lib import hicGAN
 from .lib import utils
 
 from ray import train, tune
-from ray.train import RunConfig
 from ray.tune.search.optuna import OptunaSearch
 from ray.tune.search.hyperopt import HyperOptSearch
 from ray.air import session
 
 from hicrep.utils import readMcool
 from hicrep import hicrepSCC
+
+import pygenometracks.plotTracks
 
 
 import logging
@@ -142,6 +142,9 @@ def parse_arguments(args=None):
     parser.add_argument("--continue_experiment", "-ce", required=False,
                         type=str,
                         help="Path to a previous experiment to continue.")
+    parser.add_argument("--genomicRegion", "-gr", required=False,
+                        type=str,
+                        help="Genomic region to plot (e.g., chr1:1000000-2000000).")
     parser.add_argument('--version', action='version',
                            version='%(prog)s {}'.format(__version__))
     return parser.parse_args()
@@ -236,6 +239,35 @@ def objective(config, pArgs, pTfRecordFilenames=None, pTraindataContainerListLen
 
         score = np.mean(sccSub)
 
+    if pArgs.genomicRegion:
+        browser_tracks_with_hic = """
+[hic matrix]
+file = {0}
+title = predicted score {2}
+depth = 2000000
+transform = log1p
+file_type = hic_matrix
+show_masked_bins = false
+
+[hic matrix]
+file = {1}
+title = original matrix {3}
+depth = 2000000
+transform = log1p
+file_type = hic_matrix
+show_masked_bins = false
+""".format(os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), pArgs.originalDataMatrix, score, pArgs.cellType)
+        
+        tracks_path = os.path.join(pArgs.outputFolder, trial_id, "browser_tracks_hic.ini")
+        with open(tracks_path, 'w') as fh:
+            fh.write(browser_tracks_with_hic)
+
+        outfile = os.path.join(pArgs.outputFolder, "pygenometracks",  trial_id + ".pdf")
+        
+        arguments = f"--tracks {tracks_path} --region {pArgs.genomicRegion} "\
+                    f"--outFileName {outfile}".split()
+        pygenometracks.plotTracks.main(arguments)
+ 
     return score
 
 def objective_raytune(config, pArgs, pTfRecordFilenames=None, pTraindataContainerListLength=None, pNrSamplesList=None, pStoredFeatures=None, pNrFactors=None):
@@ -245,6 +277,7 @@ def objective_raytune(config, pArgs, pTfRecordFilenames=None, pTraindataContaine
     train.report({"accuracy": score})
 
 def run_raytune(pArgs, pContinueExperiment=None):
+    os.makedirs(os.path.join(pArgs.outputFolder, "pygenometracks"), exist_ok=True)
     # Create a ray tune experiment
     # Define the search space
     search_space = {
