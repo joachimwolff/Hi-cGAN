@@ -253,7 +253,7 @@ class DataContainer():
         samples_per_file = [target_ct]*(nr_files-1) + [nr_samples-(nr_files-1)*target_ct]
         sample_indices = [sum(samples_per_file[0:i]) for i in range(len(samples_per_file)+1)] 
         #write the single files
-        folderName = self.chromatinFolder.rstrip("/").replace("/","-")
+        folderName = self.chromatinFolder.strip("/").replace("/","_")
         recordfiles = [os.path.join(pOutputFolder, "{:s}_{:s}_{:03d}.tfrecord".format(folderName, str(self.chromosome), i + 1)) for i in range(nr_files)]
 
         def storeTFRecord(recordfile, firstIndex, lastIndex, outfolder):

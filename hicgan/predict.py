@@ -54,7 +54,7 @@ def parse_arguments(args=None):
                         help="Window size for predicting; must be the same as in trained model. Supported values are 64, 128, and 256")
     parser.add_argument('--version', action='version',
                            version='%(prog)s {}'.format(__version__))
-    return parser.parse_args()
+    return parser
 
 def prediction(pTrainedModel, pPredictionChromosomesFolders, pPredictionChromosomes, pOutputFolder, pMultiplier, pBinSize, pBatchSize, pWindowSize, pMatrixOutputName, pParameterOutputFile):
     trainedmodel = pTrainedModel
@@ -154,4 +154,13 @@ def prediction(pTrainedModel, pPredictionChromosomesFolders, pPredictionChromoso
 def main(args=None):
     args = parse_arguments().parse_args(args)
     # print(args)
-    prediction(args)
+    prediction(pTrainedModel=args.trainedModel,
+        pPredictionChromosomesFolders=args.predictionChromosomesFolders,
+        pPredictionChromosomes=args.predictionChromosomes,
+        pOutputFolder=args.outputFolder,
+        pMultiplier=args.multiplier,
+        pBinSize=args.binSize,
+        pBatchSize=args.batchSize,
+        pWindowSize=args.windowSize,
+        pMatrixOutputName=args.matrixOutputName,
+        pParameterOutputFile=args.parameterOutputFile)

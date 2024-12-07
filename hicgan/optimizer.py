@@ -11,6 +11,12 @@ from .lib import utils
 from ray import train, tune
 from ray.train import RunConfig
 from ray.tune.search.optuna import OptunaSearch
+from ray.tune.search.hyperopt import HyperOptSearch
+from ray.air import session
+
+from hicrep.utils import readMcool
+from hicrep import hicrepSCC
+
 
 import logging
 from hicgan._version import __version__
@@ -25,8 +31,8 @@ import icecream as ic
 def parse_arguments(args=None):
     parser = argparse.ArgumentParser(description="Hi-cGAN Prediction")
     parser.add_argument("--optimizer", "-op", required=True,
-                        type=str, choices=['raytune', 'opttuner'],
-                        help="Optimizer to use for training (options: 'raytune', 'opttuner')")
+                        type=str, choices=['optuna', 'hyperopt'],
+                        help="Optimizer to use for training (options: 'optuna', 'hyperopt')")
     parser.add_argument("--trainingMatrices", "-tm", required=True,
                         type=str, nargs='+',
                         help="mcooler matrices for training.")
@@ -92,8 +98,8 @@ def parse_arguments(args=None):
                         help="Name of the parameter file")
     parser.add_argument("--correlationMethod", "-cm", required=False,
                         default='pearson',
-                        type=str, choices=['pearson', 'spearman'],
-                        help="Type of error to compute (options: 'pearson', 'spearman')")
+                        type=str, choices=['pearson', 'spearman', 'hicrep'],
+                        help="Type of error to compute (options: 'pearson', 'spearman', 'hicrep')")
     parser.add_argument("--errorType", "-et", required=False,
                         default="AUC",
                         type=str, choices=['R2', 'MSE', 'MAE', 'MSLE', 'AUC'],
@@ -133,13 +139,15 @@ def parse_arguments(args=None):
     parser.add_argument("--gpu", '-g', required=False,
                         type=int, default=2,
                         help="Number of GPUs to use.")
+    parser.add_argument("--continue_experiment", "-ce", required=False,
+                        type=str,
+                        help="Path to a previous experiment to continue.")
     parser.add_argument('--version', action='version',
                            version='%(prog)s {}'.format(__version__))
     return parser.parse_args()
 
 
-
-def objective_raytune(config, pArgs, pTfRecordFilenames=None, pTraindataContainerListLength=None, pNrSamplesList=None, pStoredFeatures=None, pNrFactors=None):
+def objective(config, pArgs, pTfRecordFilenames=None, pTraindataContainerListLength=None, pNrSamplesList=None, pStoredFeatures=None, pNrFactors=None):
 
     gpu = tf.config.list_physical_devices('GPU')
     if gpu:
@@ -149,13 +157,20 @@ def objective_raytune(config, pArgs, pTfRecordFilenames=None, pTraindataContaine
         except Exception as e:
             print("Error: {}".format(e))
     strategy = tf.distribute.MirroredStrategy()
+    
+    trial_id = session.get_trial_id()
+    print("trail_id {}".format(trial_id))
 
+    os.makedirs(os.path.join(pArgs.outputFolder, trial_id), exist_ok=True)
+
+    
+    
     with strategy.scope() as scope: 
         training(
             pTfRecordFilenames=pTfRecordFilenames,
             pLengthTrainDataContainerList=pTraindataContainerListLength,
             pWindowSize=pArgs.windowSize,
-            pOutputFolder=pArgs.outputFolder,
+            pOutputFolder=os.path.join(pArgs.outputFolder, trial_id),
             pEpochs=pArgs.epochs,
             pBatchSize=pArgs.batchSize,
             pLossWeightPixel=config["loss_weight_pixel"],
@@ -177,10 +192,10 @@ def objective_raytune(config, pArgs, pTfRecordFilenames=None, pTraindataContaine
         )
 
     prediction(
-        pTrainedModel=os.path.join(pArgs.outputFolder, pArgs.generatorName),
+        pTrainedModel=os.path.join(pArgs.outputFolder, trial_id, pArgs.generatorName),
         pPredictionChromosomesFolders=pArgs.predictionChromosomesFolders,
         pPredictionChromosomes=pArgs.predictionChromosomes,
-        pOutputFolder=pArgs.outputFolder,
+        pOutputFolder=os.path.join(pArgs.outputFolder, trial_id),
         pMultiplier=config["multiplier"],
         pBinSize=pArgs.binSize,
         pBatchSize=pArgs.batchSize,
@@ -188,22 +203,48 @@ def objective_raytune(config, pArgs, pTfRecordFilenames=None, pTraindataContaine
         pMatrixOutputName=pArgs.matrixOutputName,
         pParameterOutputFile=pArgs.parameterOutputFile
     )
-
+     
     score = 0
-    for chrom in pArgs.testChromosomes:
-        score_dataframe = computePearsonCorrelation(pCoolerFile1=os.path.join(pArgs.outputFolder, pArgs.matrixOutputName), pCoolerFile2=pArgs.originalDataMatrix,
-                                                    pWindowsize_bp=pArgs.correlationDepth, pModelChromList=pArgs.trainingChromosomes, pTargetChromStr=chrom,
-                                                    pModelCellLineList=pArgs.trainingCellType, pTargetCellLineStr=pArgs.testCellType,
-                                                    pPlotOutputFile=None, pCsvOutputFile=None)
-        score += score_dataframe.loc[pArgs.correlationMethod, pArgs.errorType]
-    score = score / len(pArgs.testChromosomes)
 
+    if pArgs.correlationMethod == 'pearson':
+        for chrom in pArgs.testChromosomes:
+            score_dataframe = computePearsonCorrelation(pCoolerFile1=os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), pCoolerFile2=pArgs.originalDataMatrix,
+                                                        pWindowsize_bp=pArgs.correlationDepth, pModelChromList=pArgs.trainingChromosomes, pTargetChromStr=chrom,
+                                                        pModelCellLineList=pArgs.trainingCellType, pTargetCellLineStr=pArgs.testCellType,
+                                                        pPlotOutputFile=None, pCsvOutputFile=None)
+            score += score_dataframe.loc[pArgs.correlationMethod, pArgs.errorType]
+        score = score / len(pArgs.testChromosomes)
+
+    elif pArgs.correlationMethod == 'hicrep':
+        cool1, binSize1 = readMcool(os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), -1)
+        cool2, binSize2 = readMcool(pArgs.originalDataMatrix, -1)
+
+        # smoothing window half-size
+        h = 5
+
+        # maximal genomic distance to include in the calculation
+        dBPMax = 1000000
+
+        # whether to perform down-sampling or not 
+        # if set True, it will bootstrap the data set # with larger contact counts to
+        # the same number of contacts as in the other data set; otherwise, the contact 
+        # matrices will be normalized by the respective total number of contacts
+        bDownSample = False
+
+        # Optionally you can get SCC score from a subset of chromosomes
+        sccSub = hicrepSCC(cool1, cool2, h, dBPMax, bDownSample, pArgs.testChromosomes)
+
+        score = np.mean(sccSub)
+
+    return score
+
+def objective_raytune(config, pArgs, pTfRecordFilenames=None, pTraindataContainerListLength=None, pNrSamplesList=None, pStoredFeatures=None, pNrFactors=None):
+
+    score = objective(config, pArgs, pTfRecordFilenames, pTraindataContainerListLength, pNrSamplesList, pStoredFeatures, pNrFactors)
     print("accuracy: ", score)
     train.report({"accuracy": score})
 
-#  {"score": score}
-
-def run_raytune(pArgs):
+def run_raytune(pArgs, pContinueExperiment=None):
     # Create a ray tune experiment
     # Define the search space
     search_space = {
@@ -211,10 +252,10 @@ def run_raytune(pArgs):
         "loss_weight_pixel": tune.uniform(50.0, 150.0),
         "loss_weight_discriminator": tune.uniform(0.1, 1.0),
         "loss_type_pixel": tune.choice(["L1", "L2"]),
-        "loss_weight_tv": tune.uniform(1e-15, 1e-1),
+        "loss_weight_tv": tune.uniform(1e-15, 1e-7),
         "loss_weight_adversarial": tune.uniform(0.5, 1.5),
-        "learning_rate_generator": tune.uniform(2e-15, 2e-1),
-        "learning_rate_discriminator": tune.uniform(1e-15, 1e-1),
+        "learning_rate_generator": tune.uniform(2e-15, 2e-3),
+        "learning_rate_discriminator": tune.uniform(1e-13, 1e-3),
         "beta1": tune.uniform(0.0, 1.0),
         "flip_samples": tune.choice(["--flipSamples", ""]),
         "multiplier": tune.randint(0, 1000),
@@ -222,19 +263,20 @@ def run_raytune(pArgs):
 
     points_to_evaluate = [
         {   
-            "loss_weight_pixel": 100,
-            "loss_weight_discriminator": 0.5,
-            "loss_type_pixel": "L2",
-            "loss_weight_tv": 1e-10,
-            "loss_weight_adversarial": 1.0,
-            "learning_rate_generator": 2e-5,
-            "learning_rate_discriminator": 1e-6,
-            "beta1": 0.5,
+            "loss_weight_pixel": 59.37721008879611,
+            "loss_weight_discriminator": 0.43972911238860063,
+            "loss_type_pixel": "L1",
+            "loss_weight_tv": 8.080735989100953e-08,
+            "loss_weight_adversarial": 0.9248942024710739,
+            "learning_rate_generator": 0.0006947782705665501,
+            "learning_rate_discriminator": 0.0005652269944795734,
+            "beta1": 0.40871128817217095,
             "flip_samples": "",
-            "multiplier": 100
+            "multiplier": 282
         }
     ]
 
+    print("points_to_evaluate: ", points_to_evaluate)
     
     tfRecordFilenames, traindataContainerListLength, nr_samples_list, storedFeatures, nr_factors = create_data(
         pTrainingMatrices=pArgs.trainingMatrices, 
@@ -253,28 +295,43 @@ def run_raytune(pArgs):
       
         # Define the objective function
         # objective = tune.function(objective_raytune)
-    objective_with_param = tune.with_parameters(objective_raytune, pArgs=pArgs, pTfRecordFilenames=tfRecordFilenames, pTraindataContainerListLength=traindataContainerListLength, pNrSamplesList=nr_samples_list, pStoredFeatures=storedFeatures, pNrFactors=nr_factors)
+    objective_with_param = tune.with_parameters(objective_raytune, pArgs=pArgs, 
+                                                pTfRecordFilenames=tfRecordFilenames, 
+                                                pTraindataContainerListLength=traindataContainerListLength, 
+                                                pNrSamplesList=nr_samples_list, 
+                                                pStoredFeatures=storedFeatures, 
+                                                pNrFactors=nr_factors)
     # objective_with_param = tune.with_parameters(objective_raytune, pArgs=pArgs, pTfRecordFilenames=None, pTraindataContainerListLength=None, pNrSamplesList=None, pStoredFeatures=None, pNrFactors=None, pScope=scope)
     
     objective_with_resources = tune.with_resources(objective_with_param, resources={"cpu": pArgs.threads, "gpu": pArgs.gpu})
-    search_algorithm = OptunaSearch(metric="accuracy", 
+
+    if pArgs.optimizer == "hyperopt":
+        search_algorithm = HyperOptSearch(metric="accuracy", 
+                                        mode="max",
+                                        points_to_evaluate=points_to_evaluate)
+    elif pArgs.optimizer == "optuna":
+        search_algorithm = OptunaSearch(metric="accuracy", 
                                     mode="max",
                                     points_to_evaluate=points_to_evaluate)
 
     # tuner = tune.Tuner(objective_with_resources, param_space=search_space)  #
 
     
-
-    tuner = tune.Tuner(
-        objective_with_resources, 
-        param_space=search_space, 
-        tune_config=tune.TuneConfig(num_samples=pArgs.numberSamples,
-                                    search_alg=search_algorithm),
-    )
+    if pContinueExperiment is None or pContinueExperiment == "":
+        tuner = tune.Tuner(
+            objective_with_resources, 
+            param_space=search_space, 
+            tune_config=tune.TuneConfig(num_samples=pArgs.numberSamples,
+                                        search_alg=search_algorithm),
+        )
+    else:
+        tuner = tune.Tuner.restore(path=pContinueExperiment, trainable=objective_with_resources)
+        
     results = tuner.fit()
 
 
     print(results.get_best_result(metric="accuracy", mode="max").config)
+    # print(results.get_best_trial(metric="accuracy", mode="max"))
 
     delete_model_files(pTFRecordFiles=tfRecordFilenames)
 
@@ -287,7 +344,4 @@ def run_opttuner():
 
 def main(args=None):
     args = parse_arguments()
-    if args.optimizer == 'raytune':
-        run_raytune(pArgs=args)
-    elif args.optimizer == 'opttuner':
-        run_opttuner()
+    run_raytune(pArgs=args, pContinueExperiment=args.continue_experiment)
