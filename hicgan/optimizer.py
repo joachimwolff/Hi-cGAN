@@ -1,5 +1,7 @@
+import icecream as ic
 import argparse
 import numpy as np
+import pandas as pd
 import os
 import tensorflow as tf
 from .lib import dataContainer
@@ -17,6 +19,8 @@ from hicrep import hicrepSCC
 
 import pygenometracks.plotTracks
 
+from hicexplorer import hicFindTADs
+
 
 import logging
 from hicgan._version import __version__
@@ -26,7 +30,6 @@ from hicgan.lib.utils import computePearsonCorrelation
 
 log = logging.getLogger(__name__)
 
-import icecream as ic
 
 def parse_arguments(args=None):
     parser = argparse.ArgumentParser(description="Hi-cGAN Prediction")
@@ -60,7 +63,7 @@ def parse_arguments(args=None):
     parser.add_argument("--testChromosomesFolders", "-tecp", required=True,
                         type=str, nargs='+',
                         help="Path where chromatin factors for test reside (bigwig files).")
-    
+
     parser.add_argument("--originalDataMatrix", "-odm", required=True,
                         type=str,
                         help="Original data matrix for comparison.")
@@ -81,7 +84,7 @@ def parse_arguments(args=None):
                         type=int,
                         default=2000,
                         help="Approx. size (number of samples) of the tfRecords used in the data pipeline for training.")
-    
+
     parser.add_argument("--predictionChromosomesFolders", "-pcp", required=True,
                         type=str,
                         help="Path where test data (bigwig files) resides")
@@ -98,8 +101,9 @@ def parse_arguments(args=None):
                         help="Name of the parameter file")
     parser.add_argument("--correlationMethod", "-cm", required=False,
                         default='pearson',
-                        type=str, choices=['pearson', 'spearman', 'hicrep'],
-                        help="Type of error to compute (options: 'pearson', 'spearman', 'hicrep')")
+                        type=str, choices=['pearson',
+                            'spearman', 'hicrep', 'TAD'],
+                        help="Type of error to compute (options: 'pearson', 'spearman', 'hicrep', 'TAD')")
     parser.add_argument("--errorType", "-et", required=False,
                         default="AUC",
                         type=str, choices=['R2', 'MSE', 'MAE', 'MSLE', 'AUC'],
@@ -121,7 +125,7 @@ def parse_arguments(args=None):
                         default=1000000,
                         help="Bin size for the Hi-C matrix to compute the correlation.")
     parser.add_argument("--binSize", "-b", required=True,
-                        type=int, 
+                        type=int,
                         help="Bin size for binning the chromatin features")
     parser.add_argument("--generatorName", "-gn", required=False,
                         type=str,
@@ -160,15 +164,13 @@ def objective(config, pArgs, pTfRecordFilenames=None, pTraindataContainerListLen
         except Exception as e:
             print("Error: {}".format(e))
     strategy = tf.distribute.MirroredStrategy()
-    
+
     trial_id = session.get_trial_id()
     print("trail_id {}".format(trial_id))
 
     os.makedirs(os.path.join(pArgs.outputFolder, trial_id), exist_ok=True)
 
-    
-    
-    with strategy.scope() as scope: 
+    with strategy.scope() as scope:
         training(
             pTfRecordFilenames=pTfRecordFilenames,
             pLengthTrainDataContainerList=pTraindataContainerListLength,
@@ -189,13 +191,14 @@ def objective(config, pArgs, pTfRecordFilenames=None, pTraindataContainerListLen
             pScope=scope,
             pStoredFeaturesDict=pStoredFeatures,
             pNumberSamplesList=pNrSamplesList,
-            pNumberOfFactors=pNrFactors, 
+            pNumberOfFactors=pNrFactors,
             pFlipSamples=config["flip_samples"],
             pRecordSize=pArgs.recordSize
         )
 
     prediction(
-        pTrainedModel=os.path.join(pArgs.outputFolder, trial_id, pArgs.generatorName),
+        pTrainedModel=os.path.join(
+            pArgs.outputFolder, trial_id, pArgs.generatorName),
         pPredictionChromosomesFolders=pArgs.predictionChromosomesFolders,
         pPredictionChromosomes=pArgs.predictionChromosomes,
         pOutputFolder=os.path.join(pArgs.outputFolder, trial_id),
@@ -206,7 +209,7 @@ def objective(config, pArgs, pTfRecordFilenames=None, pTraindataContainerListLen
         pMatrixOutputName=pArgs.matrixOutputName,
         pParameterOutputFile=pArgs.parameterOutputFile
     )
-     
+
     score = 0
 
     if pArgs.correlationMethod == 'pearson':
@@ -215,11 +218,13 @@ def objective(config, pArgs, pTfRecordFilenames=None, pTraindataContainerListLen
                                                         pWindowsize_bp=pArgs.correlationDepth, pModelChromList=pArgs.trainingChromosomes, pTargetChromStr=chrom,
                                                         pModelCellLineList=pArgs.trainingCellType, pTargetCellLineStr=pArgs.testCellType,
                                                         pPlotOutputFile=None, pCsvOutputFile=None)
-            score += score_dataframe.loc[pArgs.correlationMethod, pArgs.errorType]
+            score += score_dataframe.loc[pArgs.correlationMethod,
+                pArgs.errorType]
         score = score / len(pArgs.testChromosomes)
 
     elif pArgs.correlationMethod == 'hicrep':
-        cool1, binSize1 = readMcool(os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), -1)
+        cool1, binSize1 = readMcool(os.path.join(
+            pArgs.outputFolder, trial_id, pArgs.matrixOutputName), -1)
         cool2, binSize2 = readMcool(pArgs.originalDataMatrix, -1)
 
         # smoothing window half-size
@@ -228,16 +233,38 @@ def objective(config, pArgs, pTfRecordFilenames=None, pTraindataContainerListLen
         # maximal genomic distance to include in the calculation
         dBPMax = 1000000
 
-        # whether to perform down-sampling or not 
+        # whether to perform down-sampling or not
         # if set True, it will bootstrap the data set # with larger contact counts to
-        # the same number of contacts as in the other data set; otherwise, the contact 
+        # the same number of contacts as in the other data set; otherwise, the contact
         # matrices will be normalized by the respective total number of contacts
         bDownSample = False
 
         # Optionally you can get SCC score from a subset of chromosomes
-        sccSub = hicrepSCC(cool1, cool2, h, dBPMax, bDownSample, pArgs.testChromosomes)
+        sccSub = hicrepSCC(cool1, cool2, h, dBPMax,
+                           bDownSample, pArgs.testChromosomes)
 
         score = np.mean(sccSub)
+    elif pArgs.correlationMethod == 'TAD':
+        os.makedirs(os.path.join(pArgs.outputFolder, trial_id, "tads_predicted"), exist_ok=True)
+        chromosomes = ' '.join(pArgs.testChromosomes)
+        arguments_tad = "--matrix {} --minDepth {} --maxDepth {} --step {} --numberOfProcessors {}  \
+                        --outPrefix {} --minBoundaryDistance {} \
+                        --correctForMultipleTesting fdr --thresholdComparisons 0.5 --chromosomes {}".format(os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), pArgs.binSize * 3, pArgs.binSize * 10, pArgs.binSize, pArgs.threads,
+                        os.path.join(pArgs.outputFolder, trial_id, "tads_predicted") + '/tads', 100000, chromosomes).split()
+        hicFindTADs.main(arguments_tad)
+
+        tad_score_predicted = os.path.join(
+            pArgs.outputFolder, trial_id, "tads_predicted") + '/tads_score.bedgraph'
+        tad_score_orgininal = os.path.join(
+            pArgs.outputFolder, "tads_original") + '/tads_score.bedgraph'
+
+        tad_score_predicted_df = pd.read_csv(tad_score_predicted, names=[
+                                             'chromosome', 'start', 'end', 'score'], sep='\t')
+        tad_score_orgininal_df = pd.read_csv(tad_score_orgininal, names=[
+                                             'chromosome', 'start', 'end', 'score'], sep='\t')
+
+        mean_sum_of_squares = ((tad_score_predicted_df['score'] - tad_score_orgininal_df['score']) ** 2).mean()
+        score = mean_sum_of_squares
 
     if pArgs.genomicRegion:
         browser_tracks_with_hic = """
@@ -258,27 +285,47 @@ file_type = hic_matrix
 show_masked_bins = false
 orientation = inverted
 """.format(os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), pArgs.originalDataMatrix, score, pArgs.trainingCellType)
-        
-        tracks_path = os.path.join(pArgs.outputFolder, trial_id, "browser_tracks_hic.ini")
+
+        tracks_path = os.path.join(
+            pArgs.outputFolder, trial_id, "browser_tracks_hic.ini")
         with open(tracks_path, 'w') as fh:
             fh.write(browser_tracks_with_hic)
 
-        outfile = os.path.join(pArgs.outputFolder, "pygenometracks",  trial_id + ".pdf")
-        
+        outfile = os.path.join(
+            pArgs.outputFolder, "pygenometracks",  trial_id + ".pdf")
+
         arguments = f"--tracks {tracks_path} --region {pArgs.genomicRegion} "\
                     f"--outFileName {outfile}".split()
         pygenometracks.plotTracks.main(arguments)
- 
+
     return score
 
-def objective_raytune(config, pArgs, pTfRecordFilenames=None, pTraindataContainerListLength=None, pNrSamplesList=None, pStoredFeatures=None, pNrFactors=None):
 
-    score = objective(config, pArgs, pTfRecordFilenames, pTraindataContainerListLength, pNrSamplesList, pStoredFeatures, pNrFactors)
-    print("accuracy: ", score)
-    train.report({"accuracy": score})
+def objective_raytune(config, pArgs, pTfRecordFilenames=None, pTraindataContainerListLength=None, pNrSamplesList=None, pStoredFeatures=None, pNrFactors=None, pMetric=None):
+
+    score = objective(config, pArgs, pTfRecordFilenames,
+                      pTraindataContainerListLength, pNrSamplesList, pStoredFeatures, pNrFactors)
+    # print("accuracy: ", score)
+    train.report({pMetric: score})
+
 
 def run_raytune(pArgs, pContinueExperiment=None):
-    os.makedirs(os.path.join(pArgs.outputFolder, "pygenometracks"), exist_ok=True)
+    os.makedirs(os.path.join(pArgs.outputFolder,
+                "pygenometracks"), exist_ok=True)
+    os.makedirs(os.path.join(pArgs.outputFolder, "tads_original"), exist_ok=True)
+    chromosomes = ' '.join(pArgs.testChromosomes)
+    if pArgs.correlationMethod == 'TAD':
+        arguments_tad = "--matrix {} --minDepth {} --maxDepth {} --step {} --numberOfProcessors {}  \
+                            --outPrefix {} --minBoundaryDistance {} \
+                            --correctForMultipleTesting fdr --thresholdComparisons 0.5 --chromosomes {}".format(pArgs.originalDataMatrix, pArgs.binSize * 3, pArgs.binSize * 10, pArgs.binSize, pArgs.threads,
+                        os.path.join(pArgs.outputFolder, "tads_original") + '/tads', 100000, chromosomes).split()
+        print(arguments_tad)
+        hicFindTADs.main(arguments_tad)
+        tad_score_orgininal = os.path.join(
+            pArgs.outputFolder, "tads_original") + '/tads_score.bedgraph'
+        tad_score_orgininal_df = pd.read_csv(tad_score_orgininal, names=[
+                                             'chromosome', 'start', 'end', 'score'])
+
     # Create a ray tune experiment
     # Define the search space
     search_space = {
@@ -329,23 +376,31 @@ def run_raytune(pArgs, pContinueExperiment=None):
       
         # Define the objective function
         # objective = tune.function(objective_raytune)
+    metric = 'accuracy'
+    mode = 'max'
+    if pArgs.correlationMethod == 'TAD':
+        metric = 'mse'
+        mode = 'min'
+        
     objective_with_param = tune.with_parameters(objective_raytune, pArgs=pArgs, 
                                                 pTfRecordFilenames=tfRecordFilenames, 
                                                 pTraindataContainerListLength=traindataContainerListLength, 
                                                 pNrSamplesList=nr_samples_list, 
                                                 pStoredFeatures=storedFeatures, 
-                                                pNrFactors=nr_factors)
+                                                pNrFactors=nr_factors,
+                                                pMetric=metric)
     # objective_with_param = tune.with_parameters(objective_raytune, pArgs=pArgs, pTfRecordFilenames=None, pTraindataContainerListLength=None, pNrSamplesList=None, pStoredFeatures=None, pNrFactors=None, pScope=scope)
     
     objective_with_resources = tune.with_resources(objective_with_param, resources={"cpu": pArgs.threads, "gpu": pArgs.gpu})
 
+    
     if pArgs.optimizer == "hyperopt":
-        search_algorithm = HyperOptSearch(metric="accuracy", 
-                                        mode="max",
+        search_algorithm = HyperOptSearch(metric=metric,
+                                        mode=mode,
                                         points_to_evaluate=points_to_evaluate)
     elif pArgs.optimizer == "optuna":
-        search_algorithm = OptunaSearch(metric="accuracy", 
-                                    mode="max",
+        search_algorithm = OptunaSearch(metric=metric, 
+                                    mode=mode,
                                     points_to_evaluate=points_to_evaluate)
 
     # tuner = tune.Tuner(objective_with_resources, param_space=search_space)  #
@@ -364,7 +419,7 @@ def run_raytune(pArgs, pContinueExperiment=None):
     results = tuner.fit()
 
 
-    print(results.get_best_result(metric="accuracy", mode="max").config)
+    print(results.get_best_result(metric=metric, mode=mode).config)
     # print(results.get_best_trial(metric="accuracy", mode="max"))
 
     delete_model_files(pTFRecordFiles=tfRecordFilenames)
