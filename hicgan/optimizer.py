@@ -14,6 +14,19 @@ from ray.tune.search.optuna import OptunaSearch
 from ray.tune.search.hyperopt import HyperOptSearch
 from ray.air import session
 
+import traceback
+
+import joblib
+
+from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import PolynomialFeatures
+from sklearn.pipeline import make_pipeline
+import itertools
+from sklearn.model_selection import train_test_split, cross_val_score
+import matplotlib.pyplot as plt
+import numpy as np
+from sklearn.metrics import mean_squared_error
+
 from hicrep.utils import readMcool
 from hicrep import hicrepSCC
 
@@ -99,15 +112,43 @@ def parse_arguments(args=None):
                         type=str,
                         default="predParams.csv",
                         help="Name of the parameter file")
-    parser.add_argument("--correlationMethod", "-cm", required=False,
+    parser.add_argument("--polynomialModel", "-pm", required=False,
                         default='pearson',
-                        type=str, choices=['pearson',
-                            'spearman', 'hicrep', 'TAD'],
-                        help="Type of error to compute (options: 'pearson', 'spearman', 'hicrep', 'TAD')")
-    parser.add_argument("--errorType", "-et", required=False,
-                        default="AUC",
-                        type=str, choices=['R2', 'MSE', 'MAE', 'MSLE', 'AUC'],
-                        help="Type of error to compute (options: 'R2', 'MSE', 'MAE', 'MSLE', 'AUC')")
+                        type=str, choices=['p_A-h',
+                                            'p_A-T_f',
+                                            'p_A-T_f_e_m',
+                                            'h-T_f',
+                                            'h-T_f_e_m',
+                                            'T_f-T_f_e_m',
+                                            'p_A-h-T_f',
+                                            'p_A-h-T_f_e_m',
+                                            'p_A-T_f-T_f_e_m',
+                                            'h-T_f-T_f_e_m',
+                                            'p_A-h-T_f-T_f_e_m'],
+                        # help="Type of error to compute (options: 'pearson', 'spearman', 'hicrep', 'TAD')")
+
+                        help="Type of error to compute (options: 'p_A_h', 'p_A_T_f', 'p_A_T_f_e_m', \
+                                                                    'h_T_f', \
+                                                                    'h_T_f_e_m', \
+                                                                    'T_f_T_f_e_m', \
+                                                                    'p_A_h_T_f', \
+                                                                    'p_A_h_T_f_e_m', \
+                                                                    'p_A_T_f_T_f_e_m', \
+                                                                    'h_T_f_T_f_e_m', \
+                                                                    'p_A_h_T_f_T_f_e_m'")
+    parser.add_argument("--polynomialModelFolder", "-pmf", required=False,
+                        type=str,
+                        default=".",
+                        help="THe folder with the stored polynomial models")
+    # parser.add_argument("--correlationMethod", "-cm", required=False,
+    #                     default='pearson',
+    #                     type=str, choices=['pearson',
+    #                         'spearman', 'hicrep', 'TAD'],
+    #                     help="Type of error to compute (options: 'pearson', 'spearman', 'hicrep', 'TAD')")
+    # parser.add_argument("--errorType", "-et", required=False,
+    #                     default="AUC",
+    #                     type=str, choices=['R2', 'MSE', 'MAE', 'MSLE', 'AUC'],
+    #                     help="Type of error to compute (options: 'R2', 'MSE', 'MAE', 'MSLE', 'AUC')")
     parser.add_argument("--trainingCellType", "-tct", required=False,
                         type=str,
                         default="GM12878",
@@ -169,6 +210,8 @@ def objective(config, pArgs, pTfRecordFilenames=None, pTraindataContainerListLen
     print("trail_id {}".format(trial_id))
 
     os.makedirs(os.path.join(pArgs.outputFolder, trial_id), exist_ok=True)
+    matrixOutputNameWithoutExt = os.path.splitext(pArgs.matrixOutputName)[0]
+
 
     with strategy.scope() as scope:
         training(
@@ -210,96 +253,370 @@ def objective(config, pArgs, pTfRecordFilenames=None, pTraindataContainerListLen
         pParameterOutputFile=pArgs.parameterOutputFile
     )
 
-    score = 0
+#     score = 0
 
-    if pArgs.correlationMethod == 'pearson':
-        for chrom in pArgs.testChromosomes:
-            score_dataframe = computePearsonCorrelation(pCoolerFile1=os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), pCoolerFile2=pArgs.originalDataMatrix,
+#     if pArgs.correlationMethod == 'pearson':
+#         for chrom in pArgs.testChromosomes:
+#             score_dataframe = computePearsonCorrelation(pCoolerFile1=os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), pCoolerFile2=pArgs.originalDataMatrix,
+#                                                         pWindowsize_bp=pArgs.correlationDepth, pModelChromList=pArgs.trainingChromosomes, pTargetChromStr=chrom,
+#                                                         pModelCellLineList=pArgs.trainingCellType, pTargetCellLineStr=pArgs.testCellType,
+#                                                         pPlotOutputFile=None, pCsvOutputFile=None)
+#             score += score_dataframe.loc[pArgs.correlationMethod,
+#                 pArgs.errorType]
+#         score = score / len(pArgs.testChromosomes)
+
+#     elif pArgs.correlationMethod == 'hicrep':
+#         cool1, binSize1 = readMcool(os.path.join(
+#             pArgs.outputFolder, trial_id, pArgs.matrixOutputName), -1)
+#         cool2, binSize2 = readMcool(pArgs.originalDataMatrix, -1)
+
+#         # smoothing window half-size
+#         h = 5
+
+#         # maximal genomic distance to include in the calculation
+#         dBPMax = 1000000
+
+#         # whether to perform down-sampling or not
+#         # if set True, it will bootstrap the data set # with larger contact counts to
+#         # the same number of contacts as in the other data set; otherwise, the contact
+#         # matrices will be normalized by the respective total number of contacts
+#         bDownSample = False
+
+#         # Optionally you can get SCC score from a subset of chromosomes
+#         sccSub = hicrepSCC(cool1, cool2, h, dBPMax,
+#                            bDownSample, pArgs.testChromosomes)
+
+#         score = np.mean(sccSub)
+#     elif pArgs.correlationMethod == 'TAD':
+#         os.makedirs(os.path.join(pArgs.outputFolder, trial_id, "tads_predicted"), exist_ok=True)
+#         chromosomes = ' '.join(pArgs.testChromosomes)
+#         arguments_tad = "--matrix {} --minDepth {} --maxDepth {} --step {} --numberOfProcessors {}  \
+#                         --outPrefix {} --minBoundaryDistance {} \
+#                         --correctForMultipleTesting fdr --thresholdComparisons 0.5 --chromosomes {}".format(os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), pArgs.binSize * 3, pArgs.binSize * 10, pArgs.binSize, pArgs.threads,
+#                         os.path.join(pArgs.outputFolder, trial_id, "tads_predicted") + '/tads', 100000, chromosomes).split()
+#         hicFindTADs.main(arguments_tad)
+
+#         tad_score_predicted = os.path.join(
+#             pArgs.outputFolder, trial_id, "tads_predicted") + '/tads_score.bedgraph'
+#         tad_score_orgininal = os.path.join(
+#             pArgs.outputFolder, "tads_original") + '/tads_score.bedgraph'
+
+#         tad_score_predicted_df = pd.read_csv(tad_score_predicted, names=[
+#                                              'chromosome', 'start', 'end', 'score'], sep='\t')
+#         tad_score_orgininal_df = pd.read_csv(tad_score_orgininal, names=[
+#                                              'chromosome', 'start', 'end', 'score'], sep='\t')
+
+#         mean_sum_of_squares = ((tad_score_predicted_df['score'] - tad_score_orgininal_df['score']) ** 2).mean()
+#         score = mean_sum_of_squares
+
+#     if pArgs.genomicRegion:
+#         browser_tracks_with_hic = """
+# [hic matrix]
+# file = {0}
+# title = predicted score {2}
+# depth = 3000000
+# transform = log1p
+# file_type = hic_matrix
+# show_masked_bins = false
+
+# [hic matrix]
+# file = {1}
+# title = original matrix {3}
+# depth = 3000000
+# transform = log1p
+# file_type = hic_matrix
+# show_masked_bins = false
+# orientation = inverted
+# """.format(os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), pArgs.originalDataMatrix, score, pArgs.trainingCellType)
+
+#         tracks_path = os.path.join(
+#             pArgs.outputFolder, trial_id, "browser_tracks_hic.ini")
+#         with open(tracks_path, 'w') as fh:
+#             fh.write(browser_tracks_with_hic)
+
+#         outfile = os.path.join(
+#             pArgs.outputFolder, "pygenometracks",  trial_id + ".pdf")
+
+#         arguments = f"--tracks {tracks_path} --region {pArgs.genomicRegion} "\
+#                     f"--outFileName {outfile}".split()
+#         pygenometracks.plotTracks.main(arguments)
+
+#     return score
+
+    score_dict = {}
+    correlationMethodList = ['pearson_spearman', 'hicrep', 'TAD_score_MSE', "TAD_fraction"]
+    errorType = ['R2', 'MSE', 'MAE', 'MSLE', 'AUC'] 
+    for correlationMethod in correlationMethodList:
+        
+        # for chromosome in testChromosomes:
+        #     if chromosome not in cooler_file1.chromnames:
+        #         return
+        #     if chromosome not in cooler_file2.chromnames:
+        #         return
+        
+        if correlationMethod == 'pearson_spearman':
+            for chrom in pArgs.testChromosomes:
+                score_dataframe = computePearsonCorrelation(pCoolerFile1=os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), pCoolerFile2=pArgs.originalDataMatrix,
                                                         pWindowsize_bp=pArgs.correlationDepth, pModelChromList=pArgs.trainingChromosomes, pTargetChromStr=chrom,
                                                         pModelCellLineList=pArgs.trainingCellType, pTargetCellLineStr=pArgs.testCellType,
                                                         pPlotOutputFile=None, pCsvOutputFile=None)
-            score += score_dataframe.loc[pArgs.correlationMethod,
-                pArgs.errorType]
-        score = score / len(pArgs.testChromosomes)
+                for correlationMethod_ in ['pearson', 'spearman']:
+                    for errorType_ in errorType:
+                        if correlationMethod_ + '_' + errorType_ in score_dict:
+                            score_dict[correlationMethod_ + '_' + errorType_][0] += score_dataframe.loc[correlationMethod_, errorType_]
+                        else:
+                            score_dict[correlationMethod_ + '_' + errorType_] = [score_dataframe.loc[correlationMethod_, errorType_]]
 
-    elif pArgs.correlationMethod == 'hicrep':
-        cool1, binSize1 = readMcool(os.path.join(
+            for correlationMethod_ in ['pearson', 'spearman']:
+                for errorType_ in errorType:
+                    score_dict[correlationMethod_ + '_' + errorType_][0] = score_dict[correlationMethod_ + '_' + errorType_][0] / len(pArgs.testChromosomes)
+            # score = score / len(testChromosomes)
+
+        elif correlationMethod == 'hicrep':
+            # cool1, binSize1 = readMcool(os.path.join(
+            #     dataFolder, matrixOutputName), -1)
+            # cool2, binSize2 = readMcool(originalDataMatrix, -1)
+
+            # # smoothing window half-size
+            # h = 5
+
+            # # maximal genomic distance to include in the calculation
+            # dBPMax = 1000000
+
+            # # whether to perform down-sampling or not
+            # # if set True, it will bootstrap the data set # with larger contact counts to
+            # # the same number of contacts as in the other data set; otherwise, the contact
+            # # matrices will be normalized by the respective total number of contacts
+            # bDownSample = False
+
+            # # Optionally you can get SCC score from a subset of chromosomes
+            # sccSub = hicrepSCC(cool1, cool2, h, dBPMax,
+            #                     bDownSample, testChromosomes)
+
+            cool1, binSize1 = readMcool(os.path.join(
             pArgs.outputFolder, trial_id, pArgs.matrixOutputName), -1)
-        cool2, binSize2 = readMcool(pArgs.originalDataMatrix, -1)
+            cool2, binSize2 = readMcool(pArgs.originalDataMatrix, -1)
 
-        # smoothing window half-size
-        h = 5
+            # smoothing window half-size
+            h = 5
 
-        # maximal genomic distance to include in the calculation
-        dBPMax = 1000000
+            # maximal genomic distance to include in the calculation
+            dBPMax = 1000000
 
-        # whether to perform down-sampling or not
-        # if set True, it will bootstrap the data set # with larger contact counts to
-        # the same number of contacts as in the other data set; otherwise, the contact
-        # matrices will be normalized by the respective total number of contacts
-        bDownSample = False
+            # whether to perform down-sampling or not
+            # if set True, it will bootstrap the data set # with larger contact counts to
+            # the same number of contacts as in the other data set; otherwise, the contact
+            # matrices will be normalized by the respective total number of contacts
+            bDownSample = False
 
-        # Optionally you can get SCC score from a subset of chromosomes
-        sccSub = hicrepSCC(cool1, cool2, h, dBPMax,
-                           bDownSample, pArgs.testChromosomes)
+            # Optionally you can get SCC score from a subset of chromosomes
+            sccSub = hicrepSCC(cool1, cool2, h, dBPMax,
+                            bDownSample, pArgs.testChromosomes)
 
-        score = np.mean(sccSub)
-    elif pArgs.correlationMethod == 'TAD':
-        os.makedirs(os.path.join(pArgs.outputFolder, trial_id, "tads_predicted"), exist_ok=True)
-        chromosomes = ' '.join(pArgs.testChromosomes)
-        arguments_tad = "--matrix {} --minDepth {} --maxDepth {} --step {} --numberOfProcessors {}  \
-                        --outPrefix {} --minBoundaryDistance {} \
-                        --correctForMultipleTesting fdr --thresholdComparisons 0.5 --chromosomes {}".format(os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), pArgs.binSize * 3, pArgs.binSize * 10, pArgs.binSize, pArgs.threads,
-                        os.path.join(pArgs.outputFolder, trial_id, "tads_predicted") + '/tads', 100000, chromosomes).split()
-        hicFindTADs.main(arguments_tad)
+#         score = np.mean(sccSub)
 
-        tad_score_predicted = os.path.join(
-            pArgs.outputFolder, trial_id, "tads_predicted") + '/tads_score.bedgraph'
-        tad_score_orgininal = os.path.join(
-            pArgs.outputFolder, "tads_original") + '/tads_score.bedgraph'
+            score_dict[correlationMethod] = [np.mean(sccSub)]
+        elif correlationMethod == 'TAD_score_MSE' or correlationMethod == 'TAD_fraction':
+            
+            # os.makedirs(os.path.join(outputFolder, "tads_predicted_" + matrixOutputNameWithoutExt), exist_ok=True)
+            os.makedirs(os.path.join(pArgs.outputFolder, trial_id, "tads_predicted"), exist_ok=True)
+            
+            # chromosomes = ' '.join(testChromosomes)
+            chromosomes = ' '.join(pArgs.testChromosomes)
+            arguments_tad = "--matrix {} --minDepth {} --maxDepth {} --step {} --numberOfProcessors {}  \
+                             --outPrefix {} --minBoundaryDistance {} \
+                             --correctForMultipleTesting fdr --thresholdComparisons 0.5 --chromosomes {}".format(os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), pArgs.binSize * 3, pArgs.binSize * 10, pArgs.binSize, pArgs.threads,
+                            os.path.join(pArgs.outputFolder, trial_id, "tads_predicted") + '/tads', 100000, chromosomes).split()
+            # hicFindTADs.main(arguments_tad)
+            try:
+                hicFindTADs.main(arguments_tad)
+            except Exception as e:
+                traceback.print_exc()
+                # print(os.path.join(dataFolder, matrixOutputName))
+                print(e)
+                return
 
-        tad_score_predicted_df = pd.read_csv(tad_score_predicted, names=[
-                                             'chromosome', 'start', 'end', 'score'], sep='\t')
-        tad_score_orgininal_df = pd.read_csv(tad_score_orgininal, names=[
-                                             'chromosome', 'start', 'end', 'score'], sep='\t')
+            if correlationMethod == 'TAD_score_MSE':
+                # tad_score_predicted = os.path.join(
+                #     outputFolder, "tads_predicted_" + matrixOutputNameWithoutExt) + '/tads_score.bedgraph'
+                tad_score_predicted = os.path.join(
+                    pArgs.outputFolder, trial_id, "tads_predicted") + '/tads_score.bedgraph'
+                # tad_score_orgininal = os.path.join(
+                #     tadFolder, "tads_original") + '/tads_score.bedgraph'
+                tad_score_orgininal = os.path.join(
+                    pArgs.outputFolder, "tads_original") + '/tads_score.bedgraph'
 
-        mean_sum_of_squares = ((tad_score_predicted_df['score'] - tad_score_orgininal_df['score']) ** 2).mean()
-        score = mean_sum_of_squares
+
+                tad_score_predicted_df = pd.read_csv(tad_score_predicted, names=[
+                                                        'chromosome', 'start', 'end', 'score'], sep='\t')
+                tad_score_orgininal_df = pd.read_csv(tad_score_orgininal, names=[
+                                                        'chromosome', 'start', 'end', 'score'], sep='\t')
+
+            
+                mean_sum_of_squares = ((tad_score_predicted_df['score'] - tad_score_orgininal_df['score']) ** 2).mean()
+                score_dict[correlationMethod] = [mean_sum_of_squares]
+            elif correlationMethod == 'TAD_fraction':
+                tad_boundaries_predicted = os.path.join(
+                     pArgs.outputFolder, trial_id, "tads_predicted")  + '/tads_boundaries.bed'
+                tad_boundaries_orgininal = os.path.join(
+                     pArgs.outputFolder, "tads_original")  + '/tads_boundaries.bed'
+
+                tad_boundaries_predicted_df = pd.read_csv(tad_boundaries_predicted, names=[
+                                                        'chromosome', 'start', 'end', 'name', 'score', '.'], sep='\t')
+                tad_boundaries_orgininal_df = pd.read_csv(tad_boundaries_orgininal, names=[
+                                                        'chromosome', 'start', 'end', 'name', 'score', '.'], sep='\t')
+                
+                tad_fraction = len(tad_boundaries_predicted_df) / len(tad_boundaries_orgininal_df)
+                
+                exact_matches = pd.merge(tad_boundaries_predicted_df[['chromosome', 'start', 'end']],
+                                        tad_boundaries_orgininal_df[['chromosome', 'start', 'end']],
+                                        on=['chromosome', 'start', 'end'], how='inner')
+                tad_fraction_exact_match = len(exact_matches) / len(tad_boundaries_orgininal_df)
+
+                score_dict[correlationMethod] = [tad_fraction]
+                score_dict[correlationMethod + '_exact_match'] = [tad_fraction_exact_match]
+
+            # os.makedirs(os.path.join(pArgs.outputFolder, trial_id, "tads_predicted"), exist_ok=True)
+            # chromosomes = ' '.join(pArgs.testChromosomes)
+            # arguments_tad = "--matrix {} --minDepth {} --maxDepth {} --step {} --numberOfProcessors {}  \
+            #                 --outPrefix {} --minBoundaryDistance {} \
+            #                 --correctForMultipleTesting fdr --thresholdComparisons 0.5 --chromosomes {}".format(os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), pArgs.binSize * 3, pArgs.binSize * 10, pArgs.binSize, pArgs.threads,
+            #                 os.path.join(pArgs.outputFolder, trial_id, "tads_predicted") + '/tads', 100000, chromosomes).split()
+            # hicFindTADs.main(arguments_tad)
+
+            # tad_score_predicted = os.path.join(
+            #     pArgs.outputFolder, trial_id, "tads_predicted") + '/tads_score.bedgraph'
+            # tad_score_orgininal = os.path.join(
+            #     pArgs.outputFolder, "tads_original") + '/tads_score.bedgraph'
+
+            # tad_score_predicted_df = pd.read_csv(tad_score_predicted, names=[
+            #                                     'chromosome', 'start', 'end', 'score'], sep='\t')
+            # tad_score_orgininal_df = pd.read_csv(tad_score_orgininal, names=[
+            #                                     'chromosome', 'start', 'end', 'score'], sep='\t')
+
+            # mean_sum_of_squares = ((tad_score_predicted_df['score'] - tad_score_orgininal_df['score']) ** 2).mean()
+            # score = mean_sum_of_squares
+
+
+
+    
+    
+    # List all files in the models_path directory
+    model_files = [f for f in os.listdir(pArgs.polynomialModelFolder) if f.endswith('.pkl')]
+    print(model_files)
+    # Initialize an empty dictionary to store the loaded models
+    loaded_models = {}
+    model = None
+    # Iterate over the saved model files and load them
+    for model_name in model_files:
+        if pArgs.polynomialModel + '.pkl' == model_name:
+            model_file = os.path.join(pArgs.polynomialModelFolder, f"{model_name}")
+            if os.path.exists(model_file):
+                model = joblib.load(model_file)
+                print(f"Loaded model: {model_name}")
+            else:
+                print(f"Model file not found: {model_file}")
+    if model is not None:
+        scores_df = pd.DataFrame(score_dict)
+        print(scores_df.columns)
+        features = []
+        features_short = {'p_A':'pearson_AUC', 'h':'hicrep', 'T_f':'TAD_fraction', 'T_f_e_m':'TAD_fraction_exact_match'}
+        names_model = pArgs.polynomialModel.split("-")
+        for name in names_model:
+            features.append(features_short[name])
+        
+        print("line 528")
+
+        print(features)
+        print("line 531")
+
+        print(scores_df[features])
+        print("line 534")
+
+        score = model.predict(scores_df[features])[0]
+        print("line 537")
+
+        print("The score is {}".format(score))
 
     if pArgs.genomicRegion:
+        score_text = pArgs.polynomialModel + str(score)
+        print(score_text)
+        os.makedirs(os.path.join(pArgs.outputFolder, "scores_txt"), exist_ok=True)
+        score_file_path = os.path.join(pArgs.outputFolder, "scores_txt", trial_id + '_' + matrixOutputNameWithoutExt + "_score_summary.txt")
+
+        with open(score_file_path, 'w') as score_file:
+            score_file.write(score_text)
+        
+        score_text = score_text.replace("\n", "; ")
         browser_tracks_with_hic = """
 [hic matrix]
 file = {0}
-title = predicted score {2}
-depth = 3000000
+title = {2}
+depth = {4}
 transform = log1p
 file_type = hic_matrix
 show_masked_bins = false
+
+[spacer]
+height = 0.5
+
+[TAD seperation score]
+file = {5}
+height = 2
+type = lines
+individual_color = grey
+pos_score_in_bin = center
+summary_color = #1f77b4
+show_data_range = true
+file_type = bedgraph_matrix
+
+[spacer]
+height = 1
 
 [hic matrix]
 file = {1}
 title = original matrix {3}
-depth = 3000000
+depth = {4}
 transform = log1p
 file_type = hic_matrix
 show_masked_bins = false
 orientation = inverted
-""".format(os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), pArgs.originalDataMatrix, score, pArgs.trainingCellType)
+
+[spacer]
+height = 0.5
+
+[TAD seperation score]
+file = {6}
+height = 2
+type = lines
+individual_color = grey
+pos_score_in_bin = center
+summary_color = #1f77b4
+show_data_range = true
+file_type = bedgraph_matrix
+    """.format(os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), pArgs.originalDataMatrix, score_text, pArgs.trainingCellType, 2000000, \
+               os.path.join(pArgs.outputFolder, trial_id, "tads_predicted", 'tads_tad_score.bm'),
+                os.path.join(pArgs.outputFolder, "tads_original", "tads_tad_score.bm"))
+           
 
         tracks_path = os.path.join(
-            pArgs.outputFolder, trial_id, "browser_tracks_hic.ini")
+            pArgs.outputFolder, "browser_tracks_hic.ini")
         with open(tracks_path, 'w') as fh:
             fh.write(browser_tracks_with_hic)
 
         outfile = os.path.join(
-            pArgs.outputFolder, "pygenometracks",  trial_id + ".pdf")
+            pArgs.outputFolder, "pygenometracks", trial_id + '_' + matrixOutputNameWithoutExt + ".pdf")
 
         arguments = f"--tracks {tracks_path} --region {pArgs.genomicRegion} "\
-                    f"--outFileName {outfile}".split()
-        pygenometracks.plotTracks.main(arguments)
-
+                    f"--outFileName {outfile} --trackLabelFraction 0.1 --width 38 --height 35".split()
+        try:
+            pygenometracks.plotTracks.main(arguments)
+        except Exception as e:
+            traceback.print_exc()
+            # print(os.path.join(dataFolder, matrixOutputName))
+            # print(originalDataMatrix)
+            print(e)
     return score
-
 
 def objective_raytune(config, pArgs, pTfRecordFilenames=None, pTraindataContainerListLength=None, pNrSamplesList=None, pStoredFeatures=None, pNrFactors=None, pMetric=None):
 
@@ -314,17 +631,17 @@ def run_raytune(pArgs, pContinueExperiment=None):
                 "pygenometracks"), exist_ok=True)
     os.makedirs(os.path.join(pArgs.outputFolder, "tads_original"), exist_ok=True)
     chromosomes = ' '.join(pArgs.testChromosomes)
-    if pArgs.correlationMethod == 'TAD':
-        arguments_tad = "--matrix {} --minDepth {} --maxDepth {} --step {} --numberOfProcessors {}  \
-                            --outPrefix {} --minBoundaryDistance {} \
-                            --correctForMultipleTesting fdr --thresholdComparisons 0.5 --chromosomes {}".format(pArgs.originalDataMatrix, pArgs.binSize * 3, pArgs.binSize * 10, pArgs.binSize, pArgs.threads,
-                        os.path.join(pArgs.outputFolder, "tads_original") + '/tads', 100000, chromosomes).split()
-        print(arguments_tad)
-        hicFindTADs.main(arguments_tad)
-        tad_score_orgininal = os.path.join(
-            pArgs.outputFolder, "tads_original") + '/tads_score.bedgraph'
-        tad_score_orgininal_df = pd.read_csv(tad_score_orgininal, names=[
-                                             'chromosome', 'start', 'end', 'score'])
+    # if pArgs.correlationMethod == 'TAD':
+    arguments_tad = "--matrix {} --minDepth {} --maxDepth {} --step {} --numberOfProcessors {}  \
+                        --outPrefix {} --minBoundaryDistance {} \
+                        --correctForMultipleTesting fdr --thresholdComparisons 0.5 --chromosomes {}".format(pArgs.originalDataMatrix, pArgs.binSize * 3, pArgs.binSize * 10, pArgs.binSize, pArgs.threads,
+                    os.path.join(pArgs.outputFolder, "tads_original") + '/tads', 100000, chromosomes).split()
+    print(arguments_tad)
+    hicFindTADs.main(arguments_tad)
+    tad_score_orgininal = os.path.join(
+        pArgs.outputFolder, "tads_original") + '/tads_score.bedgraph'
+    tad_score_orgininal_df = pd.read_csv(tad_score_orgininal, names=[
+                                        'chromosome', 'start', 'end', 'score'])
 
     # Create a ray tune experiment
     # Define the search space
@@ -378,9 +695,9 @@ def run_raytune(pArgs, pContinueExperiment=None):
         # objective = tune.function(objective_raytune)
     metric = 'accuracy'
     mode = 'max'
-    if pArgs.correlationMethod == 'TAD':
-        metric = 'mse'
-        mode = 'min'
+    # if pArgs.correlationMethod == 'TAD':
+    #     metric = 'mse'
+    #     mode = 'min'
         
     objective_with_param = tune.with_parameters(objective_raytune, pArgs=pArgs, 
                                                 pTfRecordFilenames=tfRecordFilenames, 
