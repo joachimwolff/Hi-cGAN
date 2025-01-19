@@ -205,7 +205,7 @@ def objective(config, pArgs):
     # From TF's perspective, only the GPUs listed in CUDA_VISIBLE_DEVICES exist.
     physical_gpus = tf.config.list_physical_devices('GPU')
     print(f"Physical GPUs: {physical_gpus}")
-    exit()
+    # exit()
     if physical_gpus:
         # Enable dynamic memory growth for each visible GPU
         for gpu in physical_gpus:
