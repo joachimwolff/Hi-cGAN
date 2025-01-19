@@ -242,21 +242,21 @@ def objective(config, pArgs):
 
 
 
-        def activate_lock_or_wait(file_path, method="Data generation", timeout=100):
-            start_time = time.time()
-            while os.path.exists(file_path):
-                if time.time() - start_time > timeout:
-                    raise TimeoutError(f"Active lock: {file_path} found within {timeout} seconds.")
-                time.sleep(1)
+        # def activate_lock_or_wait(file_path, method="Data generation", timeout=100):
+        #     start_time = time.time()
+        #     while os.path.exists(file_path):
+        #         if time.time() - start_time > timeout:
+        #             raise TimeoutError(f"Active lock: {file_path} found within {timeout} seconds.")
+        #         time.sleep(1)
             
-            # Create the lock file
-            with open(file_path, 'w') as lock_file:
-                lock_file.write("{} in progress".format(method))
+        #     # Create the lock file
+        #     with open(file_path, 'w') as lock_file:
+        #         lock_file.write("{} in progress".format(method))
         
-        def removeLock(file_path):
-            if os.path.exists(file_path):
-                os.remove(file_path)
-        activate_lock_or_wait(lock_file_data_generation_path)
+        # def removeLock(file_path):
+        #     if os.path.exists(file_path):
+        #         os.remove(file_path)
+        # activate_lock_or_wait(lock_file_data_generation_path)
         os.makedirs(os.path.join(pArgs.outputFolder, trial_id), exist_ok=True)
         tfRecordFilenames, traindataContainerListLength, nr_samples_list, storedFeatures, nr_factors = create_data(
             pTrainingMatrices=pArgs.trainingMatrices, 
@@ -275,7 +275,7 @@ def objective(config, pArgs):
 
         # Remove the data generation lock file
         
-        removeLock(lock_file_data_generation_path)
+        # removeLock(lock_file_data_generation_path)
         with strategy.scope() as scope:
             training(
                 pTfRecordFilenames=tfRecordFilenames,
@@ -302,7 +302,7 @@ def objective(config, pArgs):
                 pRecordSize=pArgs.recordSize
             )
 
-        activate_lock_or_wait(lock_file_prediction_path, method="Prediction")
+        # activate_lock_or_wait(lock_file_prediction_path, method="Prediction")
         prediction(
             pTrainedModel=os.path.join(
                 pArgs.outputFolder, trial_id, pArgs.generatorName),
@@ -316,7 +316,7 @@ def objective(config, pArgs):
             pMatrixOutputName=pArgs.matrixOutputName,
             pParameterOutputFile=pArgs.parameterOutputFile
         )
-        removeLock(lock_file_prediction_path)
+        # removeLock(lock_file_prediction_path)
         score_dict = {}
         correlationMethodList = ['pearson_spearman', 'hicrep', 'TAD_score_MSE', "TAD_fraction"]
         errorType = ['R2', 'MSE', 'MAE', 'MSLE', 'AUC'] 
@@ -324,12 +324,12 @@ def objective(config, pArgs):
             
             if correlationMethod == 'pearson_spearman':
                 for chrom in pArgs.testChromosomes:
-                    activate_lock_or_wait(lock_file_pearson_path, method="Pearson correlation")
+                    # activate_lock_or_wait(lock_file_pearson_path, method="Pearson correlation")
                     score_dataframe = computePearsonCorrelation(pCoolerFile1=os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), pCoolerFile2=pArgs.originalDataMatrix,
                                                             pWindowsize_bp=pArgs.correlationDepth, pModelChromList=pArgs.trainingChromosomes, pTargetChromStr=chrom,
                                                             pModelCellLineList=pArgs.trainingCellType, pTargetCellLineStr=pArgs.testCellType,
                                                             pPlotOutputFile=None, pCsvOutputFile=None)
-                    removeLock(lock_file_pearson_path)
+                    # removeLock(lock_file_pearson_path)
                     for correlationMethod_ in ['pearson', 'spearman']:
                         for errorType_ in errorType:
                             if correlationMethod_ + '_' + errorType_ in score_dict:
@@ -342,7 +342,7 @@ def objective(config, pArgs):
                         score_dict[correlationMethod_ + '_' + errorType_][0] = score_dict[correlationMethod_ + '_' + errorType_][0] / len(pArgs.testChromosomes)
 
             elif correlationMethod == 'hicrep':
-                activate_lock_or_wait(lock_file_hicrep_path, method="hicrep")
+                # activate_lock_or_wait(lock_file_hicrep_path, method="hicrep")
                 
                 cool1, binSize1 = readMcool(os.path.join(
                 pArgs.outputFolder, trial_id, pArgs.matrixOutputName), -1)
@@ -363,7 +363,7 @@ def objective(config, pArgs):
                 # Optionally you can get SCC score from a subset of chromosomes
                 sccSub = hicrepSCC(cool1, cool2, h, dBPMax,
                                 bDownSample, pArgs.testChromosomes)
-                removeLock(lock_file_hicrep_path)
+                # removeLock(lock_file_hicrep_path)
                 score_dict[correlationMethod] = [np.mean(sccSub)]
             elif correlationMethod == 'TAD_score_MSE' or correlationMethod == 'TAD_fraction':
                 os.makedirs(os.path.join(pArgs.outputFolder, trial_id, "tads_predicted"), exist_ok=True)
@@ -372,7 +372,7 @@ def objective(config, pArgs):
                                 --outPrefix {} --minBoundaryDistance {} \
                                 --correctForMultipleTesting fdr --thresholdComparisons 0.5 --chromosomes {}".format(os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), pArgs.binSize * 3, pArgs.binSize * 10, pArgs.binSize, pArgs.threads,
                                 os.path.join(pArgs.outputFolder, trial_id, "tads_predicted") + '/tads', 100000, chromosomes).split()
-                activate_lock_or_wait(lock_file_tad_path, method="TADs")
+                # activate_lock_or_wait(lock_file_tad_path, method="TADs")
                 try:
                     hicFindTADs.main(arguments_tad)
                 except Exception as e:
@@ -415,9 +415,9 @@ def objective(config, pArgs):
 
                     score_dict[correlationMethod] = [tad_fraction]
                     score_dict[correlationMethod + '_exact_match'] = [tad_fraction_exact_match]
-                removeLock(lock_file_tad_path)
+                # removeLock(lock_file_tad_path)
 
-        activate_lock_or_wait(lock_file_polynomial_path, method="Polynomial model")
+        # activate_lock_or_wait(lock_file_polynomial_path, method="Polynomial model")
         # List all files in the models_path directory
         model_files = [f for f in os.listdir(pArgs.polynomialModelFolder) if f.endswith('.pkl')]
         print(model_files)
@@ -444,8 +444,8 @@ def objective(config, pArgs):
                 features.append(features_short[name])
 
             score = model.predict(scores_df[features])[0]
-        removeLock(lock_file_polynomial_path)
-        activate_lock_or_wait(lock_file_pygenometracks_path, method="PyGenomeTracks")
+        # removeLock(lock_file_polynomial_path)
+        # activate_lock_or_wait(lock_file_pygenometracks_path, method="PyGenomeTracks")
         if pArgs.genomicRegion:
             score_text = pArgs.polynomialModel + str(score)
             os.makedirs(os.path.join(pArgs.outputFolder, "scores_txt"), exist_ok=True)
@@ -521,10 +521,10 @@ file_type = bedgraph_matrix
             except Exception as e:
                 traceback.print_exc()
                 print(e)
-        removeLock(lock_file_pygenometracks_path)
-        activate_lock_or_wait(lock_file_delete_data_path)
+        # removeLock(lock_file_pygenometracks_path)
+        # activate_lock_or_wait(lock_file_delete_data_path)
         delete_model_files(pTFRecordFiles=tfRecordFilenames)
-        removeLock(lock_file_delete_data_path)
+        # removeLock(lock_file_delete_data_path)
     except tf.errors.OpError as e:
         # tf.errors.OpError is a common superclass for many TF errors
         traceback_str = traceback.format_exc()
