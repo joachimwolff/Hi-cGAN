@@ -206,11 +206,11 @@ def objective(config, pArgs):
 
 
 
-    def wait_for_file(file_path, method="Data generation", timeout=100):
+    def wait_for_free_lock(file_path, method="Data generation", timeout=100):
         start_time = time.time()
-        while not os.path.exists(file_path):
+        while os.path.exists(file_path):
             if time.time() - start_time > timeout:
-                raise TimeoutError(f"File {file_path} not found within {timeout} seconds.")
+                raise TimeoutError(f"Active lock: {file_path} found within {timeout} seconds.")
             time.sleep(1)
         
         # Create the lock file
@@ -220,7 +220,7 @@ def objective(config, pArgs):
     def removeLock(file_path):
         if os.path.exists(file_path):
             os.remove(file_path)
-    wait_for_file(lock_file_data_generation_path)
+    wait_for_free_lock(lock_file_data_generation_path)
     tfRecordFilenames, traindataContainerListLength, nr_samples_list, storedFeatures, nr_factors = create_data(
         pTrainingMatrices=pArgs.trainingMatrices, 
         pTrainingChromosomes=pArgs.trainingChromosomes, 
@@ -265,7 +265,7 @@ def objective(config, pArgs):
             pRecordSize=pArgs.recordSize
         )
 
-    wait_for_file(lock_file_prediction_path, method="Prediction")
+    wait_for_free_lock(lock_file_prediction_path, method="Prediction")
     prediction(
         pTrainedModel=os.path.join(
             pArgs.outputFolder, trial_id, pArgs.generatorName),
@@ -287,7 +287,7 @@ def objective(config, pArgs):
         
         if correlationMethod == 'pearson_spearman':
             for chrom in pArgs.testChromosomes:
-                wait_for_file(lock_file_pearson_path, method="Pearson correlation")
+                wait_for_free_lock(lock_file_pearson_path, method="Pearson correlation")
                 score_dataframe = computePearsonCorrelation(pCoolerFile1=os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), pCoolerFile2=pArgs.originalDataMatrix,
                                                         pWindowsize_bp=pArgs.correlationDepth, pModelChromList=pArgs.trainingChromosomes, pTargetChromStr=chrom,
                                                         pModelCellLineList=pArgs.trainingCellType, pTargetCellLineStr=pArgs.testCellType,
@@ -305,7 +305,7 @@ def objective(config, pArgs):
                     score_dict[correlationMethod_ + '_' + errorType_][0] = score_dict[correlationMethod_ + '_' + errorType_][0] / len(pArgs.testChromosomes)
 
         elif correlationMethod == 'hicrep':
-            wait_for_file(lock_file_hicrep_path, method="hicrep")
+            wait_for_free_lock(lock_file_hicrep_path, method="hicrep")
             
             cool1, binSize1 = readMcool(os.path.join(
             pArgs.outputFolder, trial_id, pArgs.matrixOutputName), -1)
