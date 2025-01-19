@@ -185,14 +185,39 @@ def parse_arguments(args=None):
 
 def objective(config, pArgs):
 
-    gpu = tf.config.list_physical_devices('GPU')
-    if gpu:
-        try:
-            for gpu_device in gpu:
-                tf.config.experimental.set_memory_growth(gpu_device, True)
-        except Exception as e:
-            print("Error: {}".format(e))
-    strategy = tf.distribute.MirroredStrategy()
+    # if pArgs.gpu > 1:
+    #     gpu = tf.config.list_physical_devices('GPU')
+    #     if gpu:
+    #         try:
+    #             for gpu_device in gpu:
+    #                 tf.config.experimental.set_memory_growth(gpu_device, True)
+    #         except Exception as e:
+    #             print("Error: {}".format(e))
+    #     strategy = tf.distribute.MirroredStrategy()
+    # else:
+    #     strategy = tf.distribute.OneDeviceStrategy(device="/gpu:0")
+
+
+
+    assigned_gpus = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    print(f"Ray assigned GPU devices: {assigned_gpus}")
+
+    # From TF's perspective, only the GPUs listed in CUDA_VISIBLE_DEVICES exist.
+    physical_gpus = tf.config.list_physical_devices('GPU')
+    
+    if physical_gpus:
+        # Enable dynamic memory growth for each visible GPU
+        for gpu in physical_gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        
+        # If exactly one GPU is visible, create a OneDeviceStrategy
+        if len(physical_gpus) == 1:
+            device_name = physical_gpus[0].name  # e.g. '/physical_device:GPU:0'
+            print(f"Using OneDeviceStrategy on {device_name}")
+            strategy = tf.distribute.OneDeviceStrategy(device=device_name)
+        else:
+            strategy = tf.distribute.MirroredStrategy()
+
 
     trial_id = session.get_trial_id()
     print("trail_id {}".format(trial_id))

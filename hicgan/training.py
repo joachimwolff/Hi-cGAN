@@ -97,9 +97,6 @@ def parse_arguments(args=None):
                         type=int,
                         default=10,
                         help="Update loss over epoch plots after this number of epochs.")
-    parser.add_argument("--gpu", '-g', required=False,
-                        type=int, default=1,
-                        help="Number of GPUs to use.")
     parser.add_argument('--version', action='version',
                            version='%(prog)s {}'.format(__version__))
 
@@ -336,17 +333,14 @@ def main(args=None):
             print(msg)
             return
     
-    if args.gpu > 1:
-        gpu = tf.config.list_physical_devices('GPU')
-        if gpu:
-            try:
-                for gpu_device in gpu:
-                    tf.config.experimental.set_memory_growth(gpu_device, True)
-            except Exception as e:
-                print("Error: {}".format(e))
-        strategy = tf.distribute.MirroredStrategy()
-    else:
-        strategy = tf.distribute.OneDeviceStrategy()
+    gpu = tf.config.list_physical_devices('GPU')
+    if gpu:
+        try:
+            for gpu_device in gpu:
+                tf.config.experimental.set_memory_growth(gpu_device, True)
+        except Exception as e:
+            print("Error: {}".format(e))
+    strategy = tf.distribute.MirroredStrategy()
 
     with strategy.scope() as scope: 
         tfRecordFilenames, traindataContainerListLength, nr_samples_list, storedFeatures, nr_factors = create_data(args.trainingMatrices, 
