@@ -90,9 +90,6 @@ def parse_arguments(args=None):
     parser.add_argument("--epochs", "-ep", required=False,
                         type=int, default=10,
                         help="Number of epochs for training.")
-    parser.add_argument("--batchSize", "-bs", required=False,
-                        type=int, default=32,
-                        help="Batch size for training.")
     parser.add_argument("--recordSize", "-rs", required=False,
                         type=int,
                         default=2000,
@@ -139,7 +136,7 @@ def parse_arguments(args=None):
     parser.add_argument("--polynomialModelFolder", "-pmf", required=False,
                         type=str,
                         default=".",
-                        help="THe folder with the stored polynomial models")
+                        help="The folder with the stored polynomial models")
     # parser.add_argument("--correlationMethod", "-cm", required=False,
     #                     default='pearson',
     #                     type=str, choices=['pearson',
@@ -220,7 +217,7 @@ def objective(config, pArgs, pTfRecordFilenames=None, pTraindataContainerListLen
             pWindowSize=pArgs.windowSize,
             pOutputFolder=os.path.join(pArgs.outputFolder, trial_id),
             pEpochs=pArgs.epochs,
-            pBatchSize=pArgs.batchSize,
+            pBatchSize=config["batch_size"],
             pLossWeightPixel=config["loss_weight_pixel"],
             pLossWeightDiscriminator=config["loss_weight_discriminator"],
             pLossWeightAdversarial=config["loss_weight_adversarial"],
@@ -247,7 +244,7 @@ def objective(config, pArgs, pTfRecordFilenames=None, pTraindataContainerListLen
         pOutputFolder=os.path.join(pArgs.outputFolder, trial_id),
         pMultiplier=config["multiplier"],
         pBinSize=pArgs.binSize,
-        pBatchSize=pArgs.batchSize,
+        pBatchSize=config["batch_size"],
         pWindowSize=pArgs.windowSize,
         pMatrixOutputName=pArgs.matrixOutputName,
         pParameterOutputFile=pArgs.parameterOutputFile
@@ -657,6 +654,7 @@ def run_raytune(pArgs, pContinueExperiment=None):
         "beta1": tune.uniform(0.0, 1.0),
         "flip_samples": tune.choice(["--flipSamples", ""]),
         "multiplier": tune.randint(0, 1000),
+        "batch_size": tune.randint(1,256)
     }
 
     points_to_evaluate = [
@@ -670,7 +668,8 @@ def run_raytune(pArgs, pContinueExperiment=None):
             "learning_rate_discriminator": 0.0005652269944795734,
             "beta1": 0.40871128817217095,
             "flip_samples": "",
-            "multiplier": 282
+            "multiplier": 282,
+            "batch_size": 10
         }
     ]
 
@@ -685,7 +684,6 @@ def run_raytune(pArgs, pContinueExperiment=None):
         pValidationChromosomesFolders=pArgs.validationChromosomesFolders,
         pWindowSize=pArgs.windowSize,
         pOutputFolder=pArgs.outputFolder,
-        pBatchSize=pArgs.batchSize,
         pFlipSamples=False,
         pFigureFileFormat="png",
         pRecordSize=pArgs.recordSize
