@@ -40,6 +40,7 @@ from hicgan._version import __version__
 from hicgan.training import training, create_data, delete_model_files
 from hicgan.predict import prediction
 from hicgan.lib.utils import computePearsonCorrelation
+import time
 
 log = logging.getLogger(__name__)
 
@@ -198,7 +199,28 @@ def objective(config, pArgs):
 
     os.makedirs(os.path.join(pArgs.outputFolder, trial_id), exist_ok=True)
     matrixOutputNameWithoutExt = os.path.splitext(pArgs.matrixOutputName)[0]
+    lock_file_data_generation_path = os.path.join(pArgs.outputFolder, "dataGeneration.lock")
+    lock_file_prediction_path = os.path.join(pArgs.outputFolder, "prediction.lock")
+    lock_file_pearson_path = os.path.join(pArgs.outputFolder, "pearson.lock")
+    lock_file_hicrep_path = os.path.join(pArgs.outputFolder, "hicrep.lock")
 
+
+
+    def wait_for_file(file_path, method="Data generation", timeout=100):
+        start_time = time.time()
+        while not os.path.exists(file_path):
+            if time.time() - start_time > timeout:
+                raise TimeoutError(f"File {file_path} not found within {timeout} seconds.")
+            time.sleep(1)
+        
+        # Create the lock file
+        with open(file_path, 'w') as lock_file:
+            lock_file.write("{} in progress".format(method))
+    
+    def removeLock(file_path):
+        if os.path.exists(file_path):
+            os.remove(file_path)
+    wait_for_file(lock_file_data_generation_path)
     tfRecordFilenames, traindataContainerListLength, nr_samples_list, storedFeatures, nr_factors = create_data(
         pTrainingMatrices=pArgs.trainingMatrices, 
         pTrainingChromosomes=pArgs.trainingChromosomes, 
@@ -214,6 +236,9 @@ def objective(config, pArgs):
         pRecordSize=pArgs.recordSize
     )
 
+    # Remove the data generation lock file
+    
+    removeLock(lock_file_data_generation_path)
     with strategy.scope() as scope:
         training(
             pTfRecordFilenames=tfRecordFilenames,
@@ -240,6 +265,7 @@ def objective(config, pArgs):
             pRecordSize=pArgs.recordSize
         )
 
+    wait_for_file(lock_file_prediction_path, method="Prediction")
     prediction(
         pTrainedModel=os.path.join(
             pArgs.outputFolder, trial_id, pArgs.generatorName),
@@ -253,7 +279,7 @@ def objective(config, pArgs):
         pMatrixOutputName=pArgs.matrixOutputName,
         pParameterOutputFile=pArgs.parameterOutputFile
     )
-
+    removeLock(lock_file_prediction_path)
     score_dict = {}
     correlationMethodList = ['pearson_spearman', 'hicrep', 'TAD_score_MSE', "TAD_fraction"]
     errorType = ['R2', 'MSE', 'MAE', 'MSLE', 'AUC'] 
@@ -261,10 +287,12 @@ def objective(config, pArgs):
         
         if correlationMethod == 'pearson_spearman':
             for chrom in pArgs.testChromosomes:
+                wait_for_file(lock_file_pearson_path, method="Pearson correlation")
                 score_dataframe = computePearsonCorrelation(pCoolerFile1=os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), pCoolerFile2=pArgs.originalDataMatrix,
                                                         pWindowsize_bp=pArgs.correlationDepth, pModelChromList=pArgs.trainingChromosomes, pTargetChromStr=chrom,
                                                         pModelCellLineList=pArgs.trainingCellType, pTargetCellLineStr=pArgs.testCellType,
                                                         pPlotOutputFile=None, pCsvOutputFile=None)
+                removeLock(lock_file_pearson_path)
                 for correlationMethod_ in ['pearson', 'spearman']:
                     for errorType_ in errorType:
                         if correlationMethod_ + '_' + errorType_ in score_dict:
@@ -277,6 +305,8 @@ def objective(config, pArgs):
                     score_dict[correlationMethod_ + '_' + errorType_][0] = score_dict[correlationMethod_ + '_' + errorType_][0] / len(pArgs.testChromosomes)
 
         elif correlationMethod == 'hicrep':
+            wait_for_file(lock_file_hicrep_path, method="hicrep")
+            
             cool1, binSize1 = readMcool(os.path.join(
             pArgs.outputFolder, trial_id, pArgs.matrixOutputName), -1)
             cool2, binSize2 = readMcool(pArgs.originalDataMatrix, -1)
@@ -296,7 +326,7 @@ def objective(config, pArgs):
             # Optionally you can get SCC score from a subset of chromosomes
             sccSub = hicrepSCC(cool1, cool2, h, dBPMax,
                             bDownSample, pArgs.testChromosomes)
-
+            removeLock(lock_file_hicrep_path)
             score_dict[correlationMethod] = [np.mean(sccSub)]
         elif correlationMethod == 'TAD_score_MSE' or correlationMethod == 'TAD_fraction':
             os.makedirs(os.path.join(pArgs.outputFolder, trial_id, "tads_predicted"), exist_ok=True)
