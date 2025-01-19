@@ -215,7 +215,7 @@ def objective(config, pArgs):
         if len(physical_gpus) == 1:
             device_name = physical_gpus[0].name  # e.g. '/physical_device:GPU:0'
             print(f"Using OneDeviceStrategy on {device_name}")
-            strategy = tf.distribute.OneDeviceStrategy()
+            strategy = tf.distribute.OneDeviceStrategy(device=device_name)
         else:
             strategy = tf.distribute.MirroredStrategy()
 
