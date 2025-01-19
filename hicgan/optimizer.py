@@ -452,10 +452,9 @@ file_type = bedgraph_matrix
     delete_model_files(pTFRecordFiles=tfRecordFilenames)
     return score
 
-def objective_raytune(config, pArgs, pTraindataContainerListLength=None, pNrSamplesList=None, pStoredFeatures=None, pNrFactors=None, pMetric=None):
+def objective_raytune(config, pArgs, pMetric):
 
-    score = objective(config, pArgs,
-                      pTraindataContainerListLength, pNrSamplesList, pStoredFeatures, pNrFactors)
+    score = objective(config, pArgs)
     train.report({pMetric: score})
 
 
