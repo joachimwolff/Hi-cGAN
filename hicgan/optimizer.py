@@ -213,9 +213,15 @@ def objective(config, pArgs):
         
         # If exactly one GPU is visible, create a OneDeviceStrategy
         if len(physical_gpus) == 1:
-            device_name = physical_gpus[0].name  # e.g. '/physical_device:GPU:0'
-            print(f"Using OneDeviceStrategy on {device_name}")
-            strategy = tf.distribute.OneDeviceStrategy(device=device_name)
+            # device_name = physical_gpus[0].name  # e.g. '/physical_device:GPU:0'
+            # print(f"Using OneDeviceStrategy on {device_name}")
+            device_index = physical_gpus[0].name.split(":")[-1]  # e.g. '0'
+            valid_tf_device = f"/device:GPU:{device_index}"
+
+            print(f"Converting {physical_gpus[0].name} -> {valid_tf_device}")
+
+            strategy = tf.distribute.OneDeviceStrategy(device=valid_tf_device)
+            # strategy = tf.distribute.OneDeviceStrategy(device=device_name)
         else:
             strategy = tf.distribute.MirroredStrategy()
 
