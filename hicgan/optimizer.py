@@ -257,6 +257,7 @@ def objective(config, pArgs):
             if os.path.exists(file_path):
                 os.remove(file_path)
         activate_lock_or_wait(lock_file_data_generation_path)
+        os.makedirs(os.path.join(pArgs.outputFolder, trial_id), exist_ok=True)
         tfRecordFilenames, traindataContainerListLength, nr_samples_list, storedFeatures, nr_factors = create_data(
             pTrainingMatrices=pArgs.trainingMatrices, 
             pTrainingChromosomes=pArgs.trainingChromosomes, 
@@ -265,7 +266,7 @@ def objective(config, pArgs):
             pValidationChromosomes=pArgs.validationChromosomes, 
             pValidationChromosomesFolders=pArgs.validationChromosomesFolders,
             pWindowSize=pArgs.windowSize,
-            pOutputFolder=pArgs.outputFolder,
+            pOutputFolder=os.path.join(pArgs.outputFolder,trial_id),
             pBatchSize=config['batch_size'],
             pFlipSamples=False,
             pFigureFileFormat="png",
