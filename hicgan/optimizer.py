@@ -203,10 +203,14 @@ def objective(config, pArgs):
     lock_file_prediction_path = os.path.join(pArgs.outputFolder, "prediction.lock")
     lock_file_pearson_path = os.path.join(pArgs.outputFolder, "pearson.lock")
     lock_file_hicrep_path = os.path.join(pArgs.outputFolder, "hicrep.lock")
+    lock_file_tad_path = os.path.join(pArgs.outputFolder, "tad.lock")
+    lock_file_polynomial_path = os.path.join(pArgs.outputFolder, "polynomial.lock")
+    lock_file_pygenometracks_path = os.path.join(pArgs.outputFolder, "pygenometracks.lock")
+    lock_file_delete_data_path = os.path.join(pArgs.outputFolder, "deleteData.lock")
 
 
 
-    def wait_for_free_lock(file_path, method="Data generation", timeout=100):
+    def activate_lock_or_wait(file_path, method="Data generation", timeout=100):
         start_time = time.time()
         while os.path.exists(file_path):
             if time.time() - start_time > timeout:
@@ -220,7 +224,7 @@ def objective(config, pArgs):
     def removeLock(file_path):
         if os.path.exists(file_path):
             os.remove(file_path)
-    wait_for_free_lock(lock_file_data_generation_path)
+    activate_lock_or_wait(lock_file_data_generation_path)
     tfRecordFilenames, traindataContainerListLength, nr_samples_list, storedFeatures, nr_factors = create_data(
         pTrainingMatrices=pArgs.trainingMatrices, 
         pTrainingChromosomes=pArgs.trainingChromosomes, 
@@ -265,7 +269,7 @@ def objective(config, pArgs):
             pRecordSize=pArgs.recordSize
         )
 
-    wait_for_free_lock(lock_file_prediction_path, method="Prediction")
+    activate_lock_or_wait(lock_file_prediction_path, method="Prediction")
     prediction(
         pTrainedModel=os.path.join(
             pArgs.outputFolder, trial_id, pArgs.generatorName),
@@ -305,7 +309,7 @@ def objective(config, pArgs):
                     score_dict[correlationMethod_ + '_' + errorType_][0] = score_dict[correlationMethod_ + '_' + errorType_][0] / len(pArgs.testChromosomes)
 
         elif correlationMethod == 'hicrep':
-            wait_for_free_lock(lock_file_hicrep_path, method="hicrep")
+            activate_lock_or_wait(lock_file_hicrep_path, method="hicrep")
             
             cool1, binSize1 = readMcool(os.path.join(
             pArgs.outputFolder, trial_id, pArgs.matrixOutputName), -1)
@@ -335,6 +339,7 @@ def objective(config, pArgs):
                              --outPrefix {} --minBoundaryDistance {} \
                              --correctForMultipleTesting fdr --thresholdComparisons 0.5 --chromosomes {}".format(os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), pArgs.binSize * 3, pArgs.binSize * 10, pArgs.binSize, pArgs.threads,
                             os.path.join(pArgs.outputFolder, trial_id, "tads_predicted") + '/tads', 100000, chromosomes).split()
+            activate_lock_or_wait(lock_file_tad_path, method="TADs")
             try:
                 hicFindTADs.main(arguments_tad)
             except Exception as e:
@@ -377,7 +382,9 @@ def objective(config, pArgs):
 
                 score_dict[correlationMethod] = [tad_fraction]
                 score_dict[correlationMethod + '_exact_match'] = [tad_fraction_exact_match]
+            removeLock(lock_file_tad_path)
 
+    activate_lock_or_wait(lock_file_polynomial_path, method="Polynomial model")
     # List all files in the models_path directory
     model_files = [f for f in os.listdir(pArgs.polynomialModelFolder) if f.endswith('.pkl')]
     print(model_files)
@@ -387,6 +394,7 @@ def objective(config, pArgs):
     # Iterate over the saved model files and load them
     for model_name in model_files:
         if pArgs.polynomialModel + '.pkl' == model_name:
+            
             model_file = os.path.join(pArgs.polynomialModelFolder, f"{model_name}")
             if os.path.exists(model_file):
                 model = joblib.load(model_file)
@@ -403,7 +411,8 @@ def objective(config, pArgs):
             features.append(features_short[name])
 
         score = model.predict(scores_df[features])[0]
-
+    removeLock(lock_file_polynomial_path)
+    activate_lock_or_wait(lock_file_pygenometracks_path, method="PyGenomeTracks")
     if pArgs.genomicRegion:
         score_text = pArgs.polynomialModel + str(score)
         os.makedirs(os.path.join(pArgs.outputFolder, "scores_txt"), exist_ok=True)
@@ -479,7 +488,10 @@ file_type = bedgraph_matrix
         except Exception as e:
             traceback.print_exc()
             print(e)
+    removeLock(lock_file_pygenometracks_path)
+    activate_lock_or_wait(lock_file_delete_data_path)
     delete_model_files(pTFRecordFiles=tfRecordFilenames)
+    removeLock(lock_file_delete_data_path)
     return score
 
 def objective_raytune(config, pArgs, pMetric):
