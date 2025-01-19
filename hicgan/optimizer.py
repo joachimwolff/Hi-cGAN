@@ -291,7 +291,7 @@ def objective(config, pArgs):
         
         if correlationMethod == 'pearson_spearman':
             for chrom in pArgs.testChromosomes:
-                wait_for_free_lock(lock_file_pearson_path, method="Pearson correlation")
+                activate_lock_or_wait(lock_file_pearson_path, method="Pearson correlation")
                 score_dataframe = computePearsonCorrelation(pCoolerFile1=os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), pCoolerFile2=pArgs.originalDataMatrix,
                                                         pWindowsize_bp=pArgs.correlationDepth, pModelChromList=pArgs.trainingChromosomes, pTargetChromStr=chrom,
                                                         pModelCellLineList=pArgs.trainingCellType, pTargetCellLineStr=pArgs.testCellType,
