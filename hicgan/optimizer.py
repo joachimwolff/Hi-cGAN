@@ -110,33 +110,12 @@ def parse_arguments(args=None):
                         type=str,
                         default="predParams.csv",
                         help="Name of the parameter file")
-    parser.add_argument("--polynomialModel", "-pm", required=False,
-                        default='pearson',
-                        type=str, choices=['p_A-h',
-                                            'p_A-T_f',
-                                            'p_A-T_f_e_m',
-                                            'h-T_f',
-                                            'h-T_f_e_m',
-                                            'T_f-T_f_e_m',
-                                            'p_A-h-T_f',
-                                            'p_A-h-T_f_e_m',
-                                            'p_A-T_f-T_f_e_m',
-                                            'h-T_f-T_f_e_m',
-                                            'p_A-h-T_f-T_f_e_m'],
-
-                        help="Type of error to compute (options: 'p_A_h', 'p_A_T_f', 'p_A_T_f_e_m', \
-                                                                    'h_T_f', \
-                                                                    'h_T_f_e_m', \
-                                                                    'T_f_T_f_e_m', \
-                                                                    'p_A_h_T_f', \
-                                                                    'p_A_h_T_f_e_m', \
-                                                                    'p_A_T_f_T_f_e_m', \
-                                                                    'h_T_f_T_f_e_m', \
-                                                                    'p_A_h_T_f_T_f_e_m'")
-    parser.add_argument("--polynomialModelFolder", "-pmf", required=False,
-                        type=str,
-                        default=".",
-                        help="The folder with the stored polynomial models")
+    parser.add_argument("--polynomialModelPath", "-pm", required=False,
+                        default='',
+                        type=str)
+    # parser.add_argument("--polynomialModelFolder", "-pm", required=False,
+    #                     default='',
+    #                     type=str)
     parser.add_argument("--trainingCellType", "-tct", required=False,
                         type=str,
                         default="GM12878",
@@ -419,27 +398,27 @@ def objective(config, pArgs):
 
         # activate_lock_or_wait(lock_file_polynomial_path, method="Polynomial model")
         # List all files in the models_path directory
-        model_files = [f for f in os.listdir(pArgs.polynomialModelFolder) if f.endswith('.pkl')]
-        print(model_files)
+        # model_files = [f for f in os.listdir(pArgs.polynomialModelFolder) if f.endswith('.pkl')]
+        # print(model_files)
         # Initialize an empty dictionary to store the loaded models
         loaded_models = {}
         model = None
         # Iterate over the saved model files and load them
-        for model_name in model_files:
-            if pArgs.polynomialModel + '.pkl' == model_name:
+        # for model_name in model_files:
+            # if pArgs.polynomialModel + '.pkl' == model_name:
                 
-                model_file = os.path.join(pArgs.polynomialModelFolder, f"{model_name}")
-                if os.path.exists(model_file):
-                    model = joblib.load(model_file)
-                    print(f"Loaded model: {model_name}")
-                else:
-                    print(f"Model file not found: {model_file}")
+            #     model_file = os.path.join(pArgs.polynomialModelFolder, f"{model_name}")
+        if os.path.exists(pArgs.polynomialModelPath):
+            model = joblib.load(pArgs.polynomialModelPath)
+            print(f"Loaded model: {pArgs.polynomialModelPath}")
+        else:
+            print(f"Model file not found: {pArgs.polynomialModelPath}")
         if model is not None:
             scores_df = pd.DataFrame(score_dict)
             print(scores_df.columns)
             features = []
             features_short = {'p_A':'pearson_AUC', 'h':'hicrep', 'T_f':'TAD_fraction', 'T_f_e_m':'TAD_fraction_exact_match'}
-            names_model = pArgs.polynomialModel.split("-")
+            names_model = pArgs.polynomialModelPath
             for name in names_model:
                 features.append(features_short[name])
 
@@ -447,7 +426,8 @@ def objective(config, pArgs):
         # removeLock(lock_file_polynomial_path)
         # activate_lock_or_wait(lock_file_pygenometracks_path, method="PyGenomeTracks")
         if pArgs.genomicRegion:
-            score_text = pArgs.polynomialModel + str(score)
+            file_name = os.path.basename(pArgs.polynomialModelPath )
+            score_text = file_name + str(score)
             os.makedirs(os.path.join(pArgs.outputFolder, "scores_txt"), exist_ok=True)
             score_file_path = os.path.join(pArgs.outputFolder, "scores_txt", trial_id + '_' + matrixOutputNameWithoutExt + "_score_summary.txt")
 
@@ -544,6 +524,8 @@ def run_raytune(pArgs, pContinueExperiment=None):
     os.makedirs(os.path.join(pArgs.outputFolder,
                 "pygenometracks"), exist_ok=True)
     os.makedirs(os.path.join(pArgs.outputFolder, "tads_original"), exist_ok=True)
+    if not os.path.exists(pArgs.polynomialModelPath):
+        raise FileNotFoundError(f"Polynomial model file not found: {pArgs.polynomialModelPath}")
     chromosomes = ' '.join(pArgs.testChromosomes)
     arguments_tad = "--matrix {} --minDepth {} --maxDepth {} --step {} --numberOfProcessors {}  \
                         --outPrefix {} --minBoundaryDistance {} \
@@ -569,7 +551,7 @@ def run_raytune(pArgs, pContinueExperiment=None):
         "beta1": tune.uniform(0.0, 1.0),
         "flip_samples": tune.choice(["--flipSamples", ""]),
         "multiplier": tune.randint(0, 1000),
-        "batch_size": tune.randint(1,256)
+        "batch_size": tune.randint(1,10)
     }
 
     points_to_evaluate = [
