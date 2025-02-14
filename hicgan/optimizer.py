@@ -417,17 +417,17 @@ def objective(config, pArgs):
             scores_df = pd.DataFrame(score_dict)
             print(scores_df.columns)
             features = []
-            features_short = {'p_A':'pearson_AUC', 'h':'hicrep', 'T_f':'TAD_fraction', 'T_f_e_m':'TAD_fraction_exact_match'}
-            names_model = pArgs.polynomialModelPath
+            # features_short = {'p_A':'pearson_AUC', 'h':'hicrep', 'T_f':'TAD_fraction', 'T_f_e_m':'TAD_fraction_exact_match'}
+            names_model = os.path.basename(pArgs.polynomialModelPath).split('.')[1].split('-')
             for name in names_model:
-                features.append(features_short[name])
+                features.append(name)
 
             score = model.predict(scores_df[features])[0]
         # removeLock(lock_file_polynomial_path)
         # activate_lock_or_wait(lock_file_pygenometracks_path, method="PyGenomeTracks")
         if pArgs.genomicRegion:
-            file_name = os.path.basename(pArgs.polynomialModelPath )
-            score_text = file_name + str(score)
+            file_name = os.path.basename(pArgs.polynomialModelPath)
+            score_text = str(score)
             os.makedirs(os.path.join(pArgs.outputFolder, "scores_txt"), exist_ok=True)
             score_file_path = os.path.join(pArgs.outputFolder, "scores_txt", trial_id + '_' + matrixOutputNameWithoutExt + "_score_summary.txt")
 
