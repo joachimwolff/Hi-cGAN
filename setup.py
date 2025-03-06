@@ -81,7 +81,7 @@ setup(
     url='https://github.com/joachimwolff/hi-cgan',
     packages=find_packages(),
     install_requires=requirements,
-    scripts=['bin/hicTraining', 'bin/hicPredict', 'bin/hicComputeCorrelation', 'bin/hicOptimizer'],
+    scripts=['bin/hicTraining', 'bin/hicPredict', 'bin/hicComputeCorrelation', 'bin/hicOptimizer', 'bin/hicScoring'],
     include_package_data=True,
     package_dir={'hicgan': 'hicgan'},
     license='LICENSE',

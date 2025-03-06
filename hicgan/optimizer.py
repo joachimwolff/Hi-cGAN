@@ -30,6 +30,7 @@ from sklearn.metrics import mean_squared_error
 from hicrep.utils import readMcool
 from hicrep import hicrepSCC
 
+import h5py
 import pygenometracks.plotTracks
 
 from hicexplorer import hicFindTADs
@@ -281,6 +282,12 @@ def objective(config, pArgs):
                 pRecordSize=pArgs.recordSize
             )
 
+
+        if not os.path.exists(os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName)):
+            with h5py.File(os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), "w") as f:
+                # Optionally, initialize any groups or datasets if necessary.
+                # For example: f.create_group("bins")
+                pass  # For now, we're just creating an empty file.
         # activate_lock_or_wait(lock_file_prediction_path, method="Prediction")
         prediction(
             pTrainedModel=os.path.join(
@@ -566,7 +573,7 @@ def run_raytune(pArgs, pContinueExperiment=None):
             "beta1": 0.40871128817217095,
             "flip_samples": "",
             "multiplier": 282,
-            "batch_size": 10
+            "batch_size": 100
         }
     ]
 
