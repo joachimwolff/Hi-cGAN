@@ -13,6 +13,7 @@ from hicgan.predict import prediction
 from hicgan.lib.utils import computePearsonCorrelation
 import joblib
 import traceback
+import shutil
 
 log = logging.getLogger(__name__)
 
@@ -191,3 +192,16 @@ def main(args=None):
     tad_score_orgininal_df = pd.read_csv(tad_score_orgininal, names=['chromosome', 'start', 'end', 'score'], sep='\t')
     log.info(f"Original TADs score: {tad_score_orgininal_df}")
     scoring(pArgs)
+
+    # Delete the created folders for TAD original and predicted
+
+    tad_original_folder = os.path.join(pArgs.outputFolder, "tads_original")
+    tad_predicted_folder = os.path.join(pArgs.outputFolder, "tads_predicted")
+
+    if os.path.exists(tad_original_folder):
+        shutil.rmtree(tad_original_folder)
+        log.info(f"Deleted folder: {tad_original_folder}")
+
+    if os.path.exists(tad_predicted_folder):
+        shutil.rmtree(tad_predicted_folder)
+        log.info(f"Deleted folder: {tad_predicted_folder}")
