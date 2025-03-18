@@ -211,14 +211,14 @@ def objective(config, pArgs):
 
         os.makedirs(os.path.join(pArgs.outputFolder, trial_id), exist_ok=True)
         matrixOutputNameWithoutExt = os.path.splitext(pArgs.matrixOutputName)[0]
-        lock_file_data_generation_path = os.path.join(pArgs.outputFolder, "dataGeneration.lock")
-        lock_file_prediction_path = os.path.join(pArgs.outputFolder, "prediction.lock")
-        lock_file_pearson_path = os.path.join(pArgs.outputFolder, "pearson.lock")
-        lock_file_hicrep_path = os.path.join(pArgs.outputFolder, "hicrep.lock")
-        lock_file_tad_path = os.path.join(pArgs.outputFolder, "tad.lock")
-        lock_file_polynomial_path = os.path.join(pArgs.outputFolder, "polynomial.lock")
-        lock_file_pygenometracks_path = os.path.join(pArgs.outputFolder, "pygenometracks.lock")
-        lock_file_delete_data_path = os.path.join(pArgs.outputFolder, "deleteData.lock")
+        # lock_file_data_generation_path = os.path.join(pArgs.outputFolder, "dataGeneration.lock")
+        # lock_file_prediction_path = os.path.join(pArgs.outputFolder, "prediction.lock")
+        # lock_file_pearson_path = os.path.join(pArgs.outputFolder, "pearson.lock")
+        # lock_file_hicrep_path = os.path.join(pArgs.outputFolder, "hicrep.lock")
+        # lock_file_tad_path = os.path.join(pArgs.outputFolder, "tad.lock")
+        # lock_file_polynomial_path = os.path.join(pArgs.outputFolder, "polynomial.lock")
+        # lock_file_pygenometracks_path = os.path.join(pArgs.outputFolder, "pygenometracks.lock")
+        # lock_file_delete_data_path = os.path.join(pArgs.outputFolder, "deleteData.lock")
 
 
 
@@ -303,6 +303,36 @@ def objective(config, pArgs):
             pParameterOutputFile=pArgs.parameterOutputFile
         )
         # removeLock(lock_file_prediction_path)
+
+        os.makedirs(os.path.join(pArgs.outputFolder, trial_id, "tads_predicted"), exist_ok=True)
+        chromosomes = ' '.join(pArgs.testChromosomes)
+        arguments_tad = "--matrix {} --minDepth {} --maxDepth {} --step {} --numberOfProcessors {}  \
+                        --outPrefix {} --minBoundaryDistance {} \
+                        --correctForMultipleTesting fdr --thresholdComparisons 0.5 --chromosomes {}".format(os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), pArgs.binSize * 3, pArgs.binSize * 10, pArgs.binSize, pArgs.threads,
+                        os.path.join(pArgs.outputFolder, trial_id, "tads_predicted") + '/tads', 100000, chromosomes).split()
+        # activate_lock_or_wait(lock_file_tad_path, method="TADs")
+        try:
+            hicFindTADs.main(arguments_tad)
+        except Exception as e:
+            traceback.print_exc()
+            print(e)
+            return
+        
+        os.makedirs(os.path.join(pArgs.outputFolder, trial_id, "tads_original"), exist_ok=True)
+
+        chromosomes = ' '.join(pArgs.testChromosomes)
+        arguments_tad = "--matrix {} --minDepth {} --maxDepth {} --step {} --numberOfProcessors {}  \
+                            --outPrefix {} --minBoundaryDistance {} \
+                            --correctForMultipleTesting fdr --thresholdComparisons 0.5 --chromosomes {}".format(pArgs.originalDataMatrix, pArgs.binSize * 3, pArgs.binSize * 10, pArgs.binSize, pArgs.threads,
+                        os.path.join(pArgs.outputFolder, trial_id, "tads_original") + '/tads', 100000, chromosomes).split()
+        print(arguments_tad)
+        hicFindTADs.main(arguments_tad)
+        tad_score_orgininal = os.path.join(
+            pArgs.outputFolder, trial_id, "tads_original") + '/tads_score.bedgraph'
+        tad_score_orgininal_df = pd.read_csv(tad_score_orgininal, names=[
+                                        'chromosome', 'start', 'end', 'score'])
+    
+
         score_dict = {}
         correlationMethodList = ['pearson_spearman', 'hicrep', 'TAD_score_MSE', "TAD_fraction"]
         errorType = ['R2', 'MSE', 'MAE', 'MSLE', 'AUC'] 
@@ -352,25 +382,13 @@ def objective(config, pArgs):
                 # removeLock(lock_file_hicrep_path)
                 score_dict[correlationMethod] = [np.mean(sccSub)]
             elif correlationMethod == 'TAD_score_MSE' or correlationMethod == 'TAD_fraction':
-                os.makedirs(os.path.join(pArgs.outputFolder, trial_id, "tads_predicted"), exist_ok=True)
-                chromosomes = ' '.join(pArgs.testChromosomes)
-                arguments_tad = "--matrix {} --minDepth {} --maxDepth {} --step {} --numberOfProcessors {}  \
-                                --outPrefix {} --minBoundaryDistance {} \
-                                --correctForMultipleTesting fdr --thresholdComparisons 0.5 --chromosomes {}".format(os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), pArgs.binSize * 3, pArgs.binSize * 10, pArgs.binSize, pArgs.threads,
-                                os.path.join(pArgs.outputFolder, trial_id, "tads_predicted") + '/tads', 100000, chromosomes).split()
-                # activate_lock_or_wait(lock_file_tad_path, method="TADs")
-                try:
-                    hicFindTADs.main(arguments_tad)
-                except Exception as e:
-                    traceback.print_exc()
-                    print(e)
-                    return
+                
 
                 if correlationMethod == 'TAD_score_MSE':
                     tad_score_predicted = os.path.join(
                         pArgs.outputFolder, trial_id, "tads_predicted") + '/tads_score.bedgraph'
                     tad_score_orgininal = os.path.join(
-                        pArgs.outputFolder, "tads_original") + '/tads_score.bedgraph'
+                        pArgs.outputFolder, trial_id, "tads_original") + '/tads_score.bedgraph'
 
 
                     tad_score_predicted_df = pd.read_csv(tad_score_predicted, names=[
@@ -385,7 +403,7 @@ def objective(config, pArgs):
                     tad_boundaries_predicted = os.path.join(
                         pArgs.outputFolder, trial_id, "tads_predicted")  + '/tads_boundaries.bed'
                     tad_boundaries_orgininal = os.path.join(
-                        pArgs.outputFolder, "tads_original")  + '/tads_boundaries.bed'
+                        pArgs.outputFolder, trial_id, "tads_original")  + '/tads_boundaries.bed'
 
                     tad_boundaries_predicted_df = pd.read_csv(tad_boundaries_predicted, names=[
                                                             'chromosome', 'start', 'end', 'name', 'score', '.'], sep='\t')
@@ -490,7 +508,7 @@ show_data_range = true
 file_type = bedgraph_matrix
         """.format(os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), pArgs.originalDataMatrix, score_text, pArgs.trainingCellType, 2000000, \
                 os.path.join(pArgs.outputFolder, trial_id, "tads_predicted", 'tads_tad_score.bm'),
-                    os.path.join(pArgs.outputFolder, "tads_original", "tads_tad_score.bm"))
+                    os.path.join(pArgs.outputFolder, trial_id, "tads_original", "tads_tad_score.bm"))
             
 
             tracks_path = os.path.join(
@@ -530,20 +548,20 @@ def objective_raytune(config, pArgs, pMetric):
 def run_raytune(pArgs, pContinueExperiment=None):
     os.makedirs(os.path.join(pArgs.outputFolder,
                 "pygenometracks"), exist_ok=True)
-    os.makedirs(os.path.join(pArgs.outputFolder, "tads_original"), exist_ok=True)
+    # os.makedirs(os.path.join(pArgs.outputFolder, "tads_original"), exist_ok=True)
     if not os.path.exists(pArgs.polynomialModelPath):
         raise FileNotFoundError(f"Polynomial model file not found: {pArgs.polynomialModelPath}")
-    chromosomes = ' '.join(pArgs.testChromosomes)
-    arguments_tad = "--matrix {} --minDepth {} --maxDepth {} --step {} --numberOfProcessors {}  \
-                        --outPrefix {} --minBoundaryDistance {} \
-                        --correctForMultipleTesting fdr --thresholdComparisons 0.5 --chromosomes {}".format(pArgs.originalDataMatrix, pArgs.binSize * 3, pArgs.binSize * 10, pArgs.binSize, pArgs.threads,
-                    os.path.join(pArgs.outputFolder, "tads_original") + '/tads', 100000, chromosomes).split()
-    print(arguments_tad)
-    hicFindTADs.main(arguments_tad)
-    tad_score_orgininal = os.path.join(
-        pArgs.outputFolder, "tads_original") + '/tads_score.bedgraph'
-    tad_score_orgininal_df = pd.read_csv(tad_score_orgininal, names=[
-                                        'chromosome', 'start', 'end', 'score'])
+    # chromosomes = ' '.join(pArgs.testChromosomes)
+    # arguments_tad = "--matrix {} --minDepth {} --maxDepth {} --step {} --numberOfProcessors {}  \
+    #                     --outPrefix {} --minBoundaryDistance {} \
+    #                     --correctForMultipleTesting fdr --thresholdComparisons 0.5 --chromosomes {}".format(pArgs.originalDataMatrix, pArgs.binSize * 3, pArgs.binSize * 10, pArgs.binSize, pArgs.threads,
+    #                 os.path.join(pArgs.outputFolder, "tads_original") + '/tads', 100000, chromosomes).split()
+    # print(arguments_tad)
+    # hicFindTADs.main(arguments_tad)
+    # tad_score_orgininal = os.path.join(
+    #     pArgs.outputFolder, "tads_original") + '/tads_score.bedgraph'
+    # tad_score_orgininal_df = pd.read_csv(tad_score_orgininal, names=[
+    #                                     'chromosome', 'start', 'end', 'score'])
 
     # Create a ray tune experiment
     # Define the search space
