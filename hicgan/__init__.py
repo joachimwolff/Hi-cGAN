@@ -2,7 +2,7 @@ import logging
 import os
 import warnings
 import sys
-# logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.DEBUG)
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # FATAL
 
 logging.basicConfig(level=logging.INFO)

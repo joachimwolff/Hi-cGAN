@@ -164,19 +164,7 @@ def parse_arguments(args=None):
 
 
 def objective(config, pArgs):
-
-    # if pArgs.gpu > 1:
-    #     gpu = tf.config.list_physical_devices('GPU')
-    #     if gpu:
-    #         try:
-    #             for gpu_device in gpu:
-    #                 tf.config.experimental.set_memory_growth(gpu_device, True)
-    #         except Exception as e:
-    #             print("Error: {}".format(e))
-    #     strategy = tf.distribute.MirroredStrategy()
-    # else:
-    #     strategy = tf.distribute.OneDeviceStrategy(device="/gpu:0")
-
+    error_return_score = 0.010101010101010101
     try:
 
         assigned_gpus = os.environ.get("CUDA_VISIBLE_DEVICES", "")
@@ -207,37 +195,14 @@ def objective(config, pArgs):
 
 
         trial_id = session.get_trial_id()
-        print("trail_id {}".format(trial_id))
+        log.debug("trail_id {}".format(trial_id))
 
         os.makedirs(os.path.join(pArgs.outputFolder, trial_id), exist_ok=True)
         matrixOutputNameWithoutExt = os.path.splitext(pArgs.matrixOutputName)[0]
-        # lock_file_data_generation_path = os.path.join(pArgs.outputFolder, "dataGeneration.lock")
-        # lock_file_prediction_path = os.path.join(pArgs.outputFolder, "prediction.lock")
-        # lock_file_pearson_path = os.path.join(pArgs.outputFolder, "pearson.lock")
-        # lock_file_hicrep_path = os.path.join(pArgs.outputFolder, "hicrep.lock")
-        # lock_file_tad_path = os.path.join(pArgs.outputFolder, "tad.lock")
-        # lock_file_polynomial_path = os.path.join(pArgs.outputFolder, "polynomial.lock")
-        # lock_file_pygenometracks_path = os.path.join(pArgs.outputFolder, "pygenometracks.lock")
-        # lock_file_delete_data_path = os.path.join(pArgs.outputFolder, "deleteData.lock")
-
-
-
-        # def activate_lock_or_wait(file_path, method="Data generation", timeout=100):
-        #     start_time = time.time()
-        #     while os.path.exists(file_path):
-        #         if time.time() - start_time > timeout:
-        #             raise TimeoutError(f"Active lock: {file_path} found within {timeout} seconds.")
-        #         time.sleep(1)
-            
-        #     # Create the lock file
-        #     with open(file_path, 'w') as lock_file:
-        #         lock_file.write("{} in progress".format(method))
-        
-        # def removeLock(file_path):
-        #     if os.path.exists(file_path):
-        #         os.remove(file_path)
-        # activate_lock_or_wait(lock_file_data_generation_path)
+   
         os.makedirs(os.path.join(pArgs.outputFolder, trial_id), exist_ok=True)
+
+        log.debug("Start data generation")
         tfRecordFilenames, traindataContainerListLength, nr_samples_list, storedFeatures, nr_factors = create_data(
             pTrainingMatrices=pArgs.trainingMatrices, 
             pTrainingChromosomes=pArgs.trainingChromosomes, 
@@ -253,9 +218,7 @@ def objective(config, pArgs):
             pRecordSize=pArgs.recordSize
         )
 
-        # Remove the data generation lock file
-        
-        # removeLock(lock_file_data_generation_path)
+        log.debug("Start training")
         with strategy.scope() as scope:
             training(
                 pTfRecordFilenames=tfRecordFilenames,
@@ -282,13 +245,12 @@ def objective(config, pArgs):
                 pRecordSize=pArgs.recordSize
             )
 
-
+        log.debug("Start prediction")
         if not os.path.exists(os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName)):
             with h5py.File(os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), "w") as f:
                 # Optionally, initialize any groups or datasets if necessary.
                 # For example: f.create_group("bins")
                 pass  # For now, we're just creating an empty file.
-        # activate_lock_or_wait(lock_file_prediction_path, method="Prediction")
         prediction(
             pTrainedModel=os.path.join(
                 pArgs.outputFolder, trial_id, pArgs.generatorName),
@@ -302,8 +264,8 @@ def objective(config, pArgs):
             pMatrixOutputName=pArgs.matrixOutputName,
             pParameterOutputFile=pArgs.parameterOutputFile
         )
-        # removeLock(lock_file_prediction_path)
 
+        log.debug("COmpute TADs predicted")
         os.makedirs(os.path.join(pArgs.outputFolder, trial_id, "tads_predicted"), exist_ok=True)
         chromosomes = ' '.join(pArgs.testChromosomes)
         arguments_tad = "--matrix {} --minDepth {} --maxDepth {} --step {} --numberOfProcessors {}  \
@@ -316,7 +278,8 @@ def objective(config, pArgs):
         except Exception as e:
             traceback.print_exc()
             print(e)
-            return
+            return error_return_score
+        log.debug("COmpute TADs original")
         
         os.makedirs(os.path.join(pArgs.outputFolder, trial_id, "tads_original"), exist_ok=True)
 
@@ -326,7 +289,12 @@ def objective(config, pArgs):
                             --correctForMultipleTesting fdr --thresholdComparisons 0.5 --chromosomes {}".format(pArgs.originalDataMatrix, pArgs.binSize * 3, pArgs.binSize * 10, pArgs.binSize, pArgs.threads,
                         os.path.join(pArgs.outputFolder, trial_id, "tads_original") + '/tads', 100000, chromosomes).split()
         print(arguments_tad)
-        hicFindTADs.main(arguments_tad)
+        try:
+            hicFindTADs.main(arguments_tad)
+        except Exception as e:
+            traceback.print_exc()
+            print(e)
+            return error_return_score
         tad_score_orgininal = os.path.join(
             pArgs.outputFolder, trial_id, "tads_original") + '/tads_score.bedgraph'
         tad_score_orgininal_df = pd.read_csv(tad_score_orgininal, names=[
@@ -336,9 +304,11 @@ def objective(config, pArgs):
         score_dict = {}
         correlationMethodList = ['pearson_spearman', 'hicrep', 'TAD_score_MSE', "TAD_fraction"]
         errorType = ['R2', 'MSE', 'MAE', 'MSLE', 'AUC'] 
+        log.debug("Compute correlation")
         for correlationMethod in correlationMethodList:
             
             if correlationMethod == 'pearson_spearman':
+                log.debug("Compute pearson spearman")
                 for chrom in pArgs.testChromosomes:
                     # activate_lock_or_wait(lock_file_pearson_path, method="Pearson correlation")
                     score_dataframe = computePearsonCorrelation(pCoolerFile1=os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), pCoolerFile2=pArgs.originalDataMatrix,
@@ -358,6 +328,7 @@ def objective(config, pArgs):
                         score_dict[correlationMethod_ + '_' + errorType_][0] = score_dict[correlationMethod_ + '_' + errorType_][0] / len(pArgs.testChromosomes)
 
             elif correlationMethod == 'hicrep':
+                log.debug("Compute hicrep")
                 # activate_lock_or_wait(lock_file_hicrep_path, method="hicrep")
                 
                 cool1, binSize1 = readMcool(os.path.join(
@@ -382,9 +353,10 @@ def objective(config, pArgs):
                 # removeLock(lock_file_hicrep_path)
                 score_dict[correlationMethod] = [np.mean(sccSub)]
             elif correlationMethod == 'TAD_score_MSE' or correlationMethod == 'TAD_fraction':
-                
-
+                log.debug("Compute TAD scoring")
                 if correlationMethod == 'TAD_score_MSE':
+                    log.debug("Compute TAD score MSE")
+
                     tad_score_predicted = os.path.join(
                         pArgs.outputFolder, trial_id, "tads_predicted") + '/tads_score.bedgraph'
                     tad_score_orgininal = os.path.join(
@@ -400,6 +372,7 @@ def objective(config, pArgs):
                     mean_sum_of_squares = ((tad_score_predicted_df['score'] - tad_score_orgininal_df['score']) ** 2).mean()
                     score_dict[correlationMethod] = [mean_sum_of_squares]
                 elif correlationMethod == 'TAD_fraction':
+                    log.debug("Compute TAD fraction")
                     tad_boundaries_predicted = os.path.join(
                         pArgs.outputFolder, trial_id, "tads_predicted")  + '/tads_boundaries.bed'
                     tad_boundaries_orgininal = os.path.join(
@@ -419,20 +392,10 @@ def objective(config, pArgs):
 
                     score_dict[correlationMethod] = [tad_fraction]
                     score_dict[correlationMethod + '_exact_match'] = [tad_fraction_exact_match]
-                # removeLock(lock_file_tad_path)
 
-        # activate_lock_or_wait(lock_file_polynomial_path, method="Polynomial model")
-        # List all files in the models_path directory
-        # model_files = [f for f in os.listdir(pArgs.polynomialModelFolder) if f.endswith('.pkl')]
-        # print(model_files)
-        # Initialize an empty dictionary to store the loaded models
         loaded_models = {}
         model = None
-        # Iterate over the saved model files and load them
-        # for model_name in model_files:
-            # if pArgs.polynomialModel + '.pkl' == model_name:
-                
-            #     model_file = os.path.join(pArgs.polynomialModelFolder, f"{model_name}")
+        log.debug("Load polynomial model")
         if os.path.exists(pArgs.polynomialModelPath):
             model = joblib.load(pArgs.polynomialModelPath)
             print(f"Loaded model: {pArgs.polynomialModelPath}")
@@ -446,11 +409,11 @@ def objective(config, pArgs):
             names_model = os.path.basename(pArgs.polynomialModelPath).split('.')[1].split('-')
             for name in names_model:
                 features.append(name)
-
+            log.debug("Predict score")
             score = model.predict(scores_df[features])[0]
-        # removeLock(lock_file_polynomial_path)
-        # activate_lock_or_wait(lock_file_pygenometracks_path, method="PyGenomeTracks")
+
         if pArgs.genomicRegion:
+            log.debug("Plot tracks")
             file_name = os.path.basename(pArgs.polynomialModelPath)
             score_text = str(score)
             os.makedirs(os.path.join(pArgs.outputFolder, "scores_txt"), exist_ok=True)
@@ -528,9 +491,11 @@ file_type = bedgraph_matrix
                 print(e)
         # removeLock(lock_file_pygenometracks_path)
         # activate_lock_or_wait(lock_file_delete_data_path)
+        log.debug("Delete data")
         delete_model_files(pTFRecordFiles=tfRecordFilenames)
         # removeLock(lock_file_delete_data_path)
     except tf.errors.OpError as e:
+        log.error("TensorFlow OpError caught")
         # tf.errors.OpError is a common superclass for many TF errors
         traceback_str = traceback.format_exc()
         # Re-raise as a generic Python exception with the original traceback
@@ -548,23 +513,12 @@ def objective_raytune(config, pArgs, pMetric):
 def run_raytune(pArgs, pContinueExperiment=None):
     os.makedirs(os.path.join(pArgs.outputFolder,
                 "pygenometracks"), exist_ok=True)
-    # os.makedirs(os.path.join(pArgs.outputFolder, "tads_original"), exist_ok=True)
     if not os.path.exists(pArgs.polynomialModelPath):
         raise FileNotFoundError(f"Polynomial model file not found: {pArgs.polynomialModelPath}")
-    # chromosomes = ' '.join(pArgs.testChromosomes)
-    # arguments_tad = "--matrix {} --minDepth {} --maxDepth {} --step {} --numberOfProcessors {}  \
-    #                     --outPrefix {} --minBoundaryDistance {} \
-    #                     --correctForMultipleTesting fdr --thresholdComparisons 0.5 --chromosomes {}".format(pArgs.originalDataMatrix, pArgs.binSize * 3, pArgs.binSize * 10, pArgs.binSize, pArgs.threads,
-    #                 os.path.join(pArgs.outputFolder, "tads_original") + '/tads', 100000, chromosomes).split()
-    # print(arguments_tad)
-    # hicFindTADs.main(arguments_tad)
-    # tad_score_orgininal = os.path.join(
-    #     pArgs.outputFolder, "tads_original") + '/tads_score.bedgraph'
-    # tad_score_orgininal_df = pd.read_csv(tad_score_orgininal, names=[
-    #                                     'chromosome', 'start', 'end', 'score'])
 
     # Create a ray tune experiment
     # Define the search space
+    log.debug("Define search space")
     search_space = {
         "loss_weight_pixel": tune.uniform(50.0, 150.0),
         "loss_weight_discriminator": tune.uniform(0.1, 1.0),
@@ -578,7 +532,7 @@ def run_raytune(pArgs, pContinueExperiment=None):
         "multiplier": tune.randint(0, 1000),
         "batch_size": tune.randint(1,10)
     }
-
+    log.debug("Define points to evaluate")
     points_to_evaluate = [
         {   
             "loss_weight_pixel": 59.37721008879611,
@@ -600,22 +554,25 @@ def run_raytune(pArgs, pContinueExperiment=None):
         # objective = tune.function(objective_raytune)
     metric = 'accuracy'
     mode = 'max'
-        
+    log.debug("Define objective function")
     objective_with_param = tune.with_parameters(objective_raytune, pArgs=pArgs,
                                                 pMetric=metric)
-    
+    log.debug("Define objective function with resources")
     objective_with_resources = tune.with_resources(objective_with_param, resources={"cpu": pArgs.threads, "gpu": pArgs.gpu})
 
     if pArgs.optimizer == "hyperopt":
+        log.debug("Use HyperOptSearch")
         search_algorithm = HyperOptSearch(metric=metric,
                                         mode=mode,
                                         points_to_evaluate=points_to_evaluate)
     elif pArgs.optimizer == "optuna":
+        log.debug("Use OptunaSearch")
         search_algorithm = OptunaSearch(metric=metric, 
                                     mode=mode,
                                     points_to_evaluate=points_to_evaluate)
 
     if pContinueExperiment is None or pContinueExperiment == "":
+        log.debug("Start new experiment")
         tuner = tune.Tuner(
             objective_with_resources, 
             param_space=search_space, 
@@ -623,11 +580,13 @@ def run_raytune(pArgs, pContinueExperiment=None):
                                         search_alg=search_algorithm),
         )
     else:
+        log.debug("Continue experiment")
         tuner = tune.Tuner.restore(path=pContinueExperiment, trainable=objective_with_resources)
-        
+
+    log.debug("Start tuning")    
     results = tuner.fit()
 
-
+    log.debug("Get best result")
     print(results.get_best_result(metric=metric, mode=mode).config)
 
 def run_opttuner():
@@ -636,3 +595,4 @@ def run_opttuner():
 def main(args=None):
     args = parse_arguments()
     run_raytune(pArgs=args, pContinueExperiment=args.continue_experiment)
+    log.debug("Finished")
