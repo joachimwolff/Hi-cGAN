@@ -13,6 +13,7 @@ from ray import train, tune
 from ray.tune.search.optuna import OptunaSearch
 from ray.tune.search.hyperopt import HyperOptSearch
 from ray.air import session
+from hyperopt import tpe, hp
 
 import traceback
 
@@ -34,7 +35,8 @@ import h5py
 import pygenometracks.plotTracks
 
 from hicexplorer import hicFindTADs
-
+import concurrent.futures
+import time
 
 import logging
 from hicgan._version import __version__
@@ -162,6 +164,28 @@ def parse_arguments(args=None):
                            version='%(prog)s {}'.format(__version__))
     return parser.parse_args()
 
+def potential_blocking_function_hicFindTADs(pArguments):
+    hicFindTADs.main(pArguments)
+
+def call_blocking_function_hicFindTADs(pArguments, pTimeout=60):
+    attempt = 0
+    max_retries = 5
+    while attempt < max_retries:
+        attempt += 1
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(potential_blocking_function_hicFindTADs, pArguments)
+            try:
+                result = future.result(timeout=pTimeout)
+                log.debug(f"Attempt {attempt}: Successfully completed.")
+                return 0  # Success code
+            except concurrent.futures.TimeoutError:
+                log.debug(f"Attempt {attempt}: Timeout after {pTimeout} seconds.")
+
+        if attempt >= 4:
+            log.debug("Maximum retries exceeded (4 attempts). Cancelling further execution.")
+            return -1  # Error code indicating failure after 4 attempts
+    return -1
+
 
 def objective(config, pArgs):
     error_return_score = 0.010101010101010101
@@ -270,11 +294,14 @@ def objective(config, pArgs):
         chromosomes = ' '.join(pArgs.testChromosomes)
         arguments_tad = "--matrix {} --minDepth {} --maxDepth {} --step {} --numberOfProcessors {}  \
                         --outPrefix {} --minBoundaryDistance {} \
-                        --correctForMultipleTesting fdr --thresholdComparisons 0.5 --chromosomes {}".format(os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), pArgs.binSize * 3, pArgs.binSize * 10, pArgs.binSize, pArgs.threads,
+                        --correctForMultipleTesting fdr --thresholdComparisons 0.5 --chromosomes {}".format(os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), pArgs.binSize * 3, pArgs.binSize * 10, pArgs.binSize, 1,
                         os.path.join(pArgs.outputFolder, trial_id, "tads_predicted") + '/tads', 100000, chromosomes).split()
         # activate_lock_or_wait(lock_file_tad_path, method="TADs")
         try:
-            hicFindTADs.main(arguments_tad)
+            return_code = call_blocking_function_hicFindTADs(arguments_tad)
+            if return_code == -1:
+                return error_return_score
+            # hicFindTADs.main(arguments_tad)
         except Exception as e:
             traceback.print_exc()
             print(e)
@@ -286,11 +313,14 @@ def objective(config, pArgs):
         chromosomes = ' '.join(pArgs.testChromosomes)
         arguments_tad = "--matrix {} --minDepth {} --maxDepth {} --step {} --numberOfProcessors {}  \
                             --outPrefix {} --minBoundaryDistance {} \
-                            --correctForMultipleTesting fdr --thresholdComparisons 0.5 --chromosomes {}".format(pArgs.originalDataMatrix, pArgs.binSize * 3, pArgs.binSize * 10, pArgs.binSize, pArgs.threads,
+                            --correctForMultipleTesting fdr --thresholdComparisons 0.5 --chromosomes {}".format(pArgs.originalDataMatrix, pArgs.binSize * 3, pArgs.binSize * 10, pArgs.binSize, 1
                         os.path.join(pArgs.outputFolder, trial_id, "tads_original") + '/tads', 100000, chromosomes).split()
         print(arguments_tad)
         try:
-            hicFindTADs.main(arguments_tad)
+            return_code = call_blocking_function_hicFindTADs(arguments_tad)
+            if return_code == -1:
+                return error_return_score
+            # hicFindTADs.main(arguments_tad)
         except Exception as e:
             traceback.print_exc()
             print(e)
@@ -564,7 +594,8 @@ def run_raytune(pArgs, pContinueExperiment=None):
         log.debug("Use HyperOptSearch")
         search_algorithm = HyperOptSearch(metric=metric,
                                         mode=mode,
-                                        points_to_evaluate=points_to_evaluate)
+                                        points_to_evaluate=points_to_evaluate,
+                                        )
     elif pArgs.optimizer == "optuna":
         log.debug("Use OptunaSearch")
         search_algorithm = OptunaSearch(metric=metric, 
