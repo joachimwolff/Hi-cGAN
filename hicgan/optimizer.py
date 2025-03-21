@@ -313,7 +313,7 @@ def objective(config, pArgs):
         chromosomes = ' '.join(pArgs.testChromosomes)
         arguments_tad = "--matrix {} --minDepth {} --maxDepth {} --step {} --numberOfProcessors {}  \
                             --outPrefix {} --minBoundaryDistance {} \
-                            --correctForMultipleTesting fdr --thresholdComparisons 0.5 --chromosomes {}".format(pArgs.originalDataMatrix, pArgs.binSize * 3, pArgs.binSize * 10, pArgs.binSize, 1
+                            --correctForMultipleTesting fdr --thresholdComparisons 0.5 --chromosomes {}".format(pArgs.originalDataMatrix, pArgs.binSize * 3, pArgs.binSize * 10, pArgs.binSize, 1,
                         os.path.join(pArgs.outputFolder, trial_id, "tads_original") + '/tads', 100000, chromosomes).split()
         print(arguments_tad)
         try:
