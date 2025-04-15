@@ -599,7 +599,7 @@ def run_raytune(pArgs, pContinueExperiment=None):
             "beta1": 0.40871128817217095,
             "flip_samples": "",
             "multiplier": 282,
-            "batch_size": 100
+            "batch_size": 1
         }
     ]
 
