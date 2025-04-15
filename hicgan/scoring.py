@@ -217,13 +217,13 @@ def main(args=None):
             score_dicts.append(scoring(pArgs,chromosome))
 
             # Delete the created folders for TAD original and predicted
-            if os.path.exists(tad_original_folder):
-                shutil.rmtree(tad_original_folder)
-                log.info(f"Deleted folder: {tad_original_folder}")
+            # if os.path.exists(tad_original_folder):
+            #     shutil.rmtree(tad_original_folder)
+            #     log.info(f"Deleted folder: {tad_original_folder}")
 
-            if os.path.exists(tad_predicted_folder):
-                shutil.rmtree(tad_predicted_folder)
-                log.info(f"Deleted folder: {tad_predicted_folder}")
+            # if os.path.exists(tad_predicted_folder):
+            #     shutil.rmtree(tad_predicted_folder)
+            #     log.info(f"Deleted folder: {tad_predicted_folder}")
         except Exception as e:
             traceback.print_exc()
             print(e)

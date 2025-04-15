@@ -53,6 +53,9 @@ def parse_arguments(args=None):
     parser.add_argument("--optimizer", "-op", required=True,
                         type=str, choices=['optuna', 'hyperopt'],
                         help="Optimizer to use for training (options: 'optuna', 'hyperopt')")
+    parser.add_argument("--scoring", "-s", required=True,
+                        type=str, choices=['polymodel', 'pearsonAUC', 'hicrep', 'TAD_score_MSE', 'TAD_fraction', 'TAD_fraction_exact_match'],
+                        help="Scoring method to use for training (options: 'polymodel', 'pearsonAUC', 'hicrep', 'TAD_score_MSE', 'TAD_fraction', 'TAD_fraction_exact_match')")
     parser.add_argument("--trainingMatrices", "-tm", required=True,
                         type=str, nargs='+',
                         help="mcooler matrices for training.")
@@ -425,26 +428,41 @@ def objective(config, pArgs):
 
         loaded_models = {}
         model = None
-        log.debug("Load polynomial model")
-        if os.path.exists(pArgs.polynomialModelPath):
-            model = joblib.load(pArgs.polynomialModelPath)
-            print(f"Loaded model: {pArgs.polynomialModelPath}")
-        else:
-            print(f"Model file not found: {pArgs.polynomialModelPath}")
-        if model is not None:
-            scores_df = pd.DataFrame(score_dict)
-            print(scores_df.columns)
-            features = []
-            # features_short = {'p_A':'pearson_AUC', 'h':'hicrep', 'T_f':'TAD_fraction', 'T_f_e_m':'TAD_fraction_exact_match'}
-            names_model = os.path.basename(pArgs.polynomialModelPath).split('.')[1].split('-')
-            for name in names_model:
-                features.append(name)
-            log.debug("Predict score")
-            score = model.predict(scores_df[features])[0]
+        if pArgs.scoring == 'polymodel':
+            log.debug("Load polynomial model")
+            if os.path.exists(pArgs.polynomialModelPath):
+                model = joblib.load(pArgs.polynomialModelPath)
+                print(f"Loaded model: {pArgs.polynomialModelPath}")
+            else:
+                print(f"Model file not found: {pArgs.polynomialModelPath}")
+            if model is not None:
+                scores_df = pd.DataFrame(score_dict)
+                print(scores_df.columns)
+                features = []
+                # features_short = {'p_A':'pearson_AUC', 'h':'hicrep', 'T_f':'TAD_fraction', 'T_f_e_m':'TAD_fraction_exact_match'}
+                names_model = os.path.basename(pArgs.polynomialModelPath).split('.')[1].split('-')
+                for name in names_model:
+                    features.append(name)
+                log.debug("Predict score")
+                score = model.predict(scores_df[features])[0]
+        elif pArgs.scoring == 'pearsonAUC':
+            score = score_dict['pearson_AUC'][0]
+        elif pArgs.scoring == 'hicrep':
+            score = score_dict['hicrep'][0]
+        elif pArgs.scoring == 'TAD_score_MSE':
+            score = score_dict['TAD_score_MSE'][0]
 
+        elif pArgs.scoring == 'TAD_fraction':
+            score = score_dict['TAD_fraction'][0]
+        
+        elif pArgs.scoring == 'TAD_fraction_exact_match':
+            score = score_dict['TAD_fraction_exact_match'][0]
+        else:
+            log.debug("Invalid scoring method specified")
+            score = error_return_score
         if pArgs.genomicRegion:
             log.debug("Plot tracks")
-            file_name = os.path.basename(pArgs.polynomialModelPath)
+                
             score_text = str(score)
             os.makedirs(os.path.join(pArgs.outputFolder, "scores_txt"), exist_ok=True)
             score_file_path = os.path.join(pArgs.outputFolder, "scores_txt", trial_id + '_' + matrixOutputNameWithoutExt + "_score_summary.txt")
@@ -543,8 +561,9 @@ def objective_raytune(config, pArgs, pMetric):
 def run_raytune(pArgs, pContinueExperiment=None):
     os.makedirs(os.path.join(pArgs.outputFolder,
                 "pygenometracks"), exist_ok=True)
-    if not os.path.exists(pArgs.polynomialModelPath):
-        raise FileNotFoundError(f"Polynomial model file not found: {pArgs.polynomialModelPath}")
+    if pArgs.scoring == 'polymodel':
+        if not os.path.exists(pArgs.polynomialModelPath):
+            raise FileNotFoundError(f"Polynomial model file not found: {pArgs.polynomialModelPath}")
 
     # Create a ray tune experiment
     # Define the search space
