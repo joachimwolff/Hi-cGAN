@@ -361,30 +361,35 @@ def objective(config, pArgs):
                         score_dict[correlationMethod_ + '_' + errorType_][0] = score_dict[correlationMethod_ + '_' + errorType_][0] / len(pArgs.testChromosomes)
 
             elif correlationMethod == 'hicrep':
-                log.debug("Compute hicrep")
-                # activate_lock_or_wait(lock_file_hicrep_path, method="hicrep")
-                
-                cool1, binSize1 = readMcool(os.path.join(
-                pArgs.outputFolder, trial_id, pArgs.matrixOutputName), -1)
-                cool2, binSize2 = readMcool(pArgs.originalDataMatrix, -1)
+                try:
+                    log.debug("Compute hicrep")
+                    # activate_lock_or_wait(lock_file_hicrep_path, method="hicrep")
+                    
+                    cool1, binSize1 = readMcool(os.path.join(
+                    pArgs.outputFolder, trial_id, pArgs.matrixOutputName), -1)
+                    cool2, binSize2 = readMcool(pArgs.originalDataMatrix, -1)
 
-                # smoothing window half-size
-                h = 5
+                    # smoothing window half-size
+                    h = 5
 
-                # maximal genomic distance to include in the calculation
-                dBPMax = 1000000
+                    # maximal genomic distance to include in the calculation
+                    dBPMax = 1000000
 
-                # whether to perform down-sampling or not
-                # if set True, it will bootstrap the data set # with larger contact counts to
-                # the same number of contacts as in the other data set; otherwise, the contact
-                # matrices will be normalized by the respective total number of contacts
-                bDownSample = False
+                    # whether to perform down-sampling or not
+                    # if set True, it will bootstrap the data set # with larger contact counts to
+                    # the same number of contacts as in the other data set; otherwise, the contact
+                    # matrices will be normalized by the respective total number of contacts
+                    bDownSample = False
 
-                # Optionally you can get SCC score from a subset of chromosomes
-                sccSub = hicrepSCC(cool1, cool2, h, dBPMax,
-                                bDownSample, pArgs.testChromosomes)
-                # removeLock(lock_file_hicrep_path)
-                score_dict[correlationMethod] = [np.mean(sccSub)]
+                    # Optionally you can get SCC score from a subset of chromosomes
+                    sccSub = hicrepSCC(cool1, cool2, h, dBPMax,
+                                    bDownSample, pArgs.testChromosomes)
+                    # removeLock(lock_file_hicrep_path)
+                    score_dict[correlationMethod] = [np.mean(sccSub)]
+                except Exception as e:
+                    traceback.print_exc()
+                    print(e)
+                    score_dict[correlationMethod] = [error_return_score]
             elif correlationMethod == 'TAD_score_MSE' or correlationMethod == 'TAD_fraction':
                 log.debug("Compute TAD scoring")
                 if correlationMethod == 'TAD_score_MSE':
