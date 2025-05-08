@@ -10,6 +10,11 @@ from matplotlib.ticker import MultipleLocator
 from tqdm import tqdm
 from scipy import sparse
 from sklearn import metrics as metrics
+import traceback
+
+import logging
+log = logging.getLogger(__name__)
+
 
 def getBigwigFileList(pDirectory):
     #returns a list of bigwig files in pDirectory
@@ -41,6 +46,8 @@ def getMatrixFromCooler(pCoolerFilePath, pChromNameStr):
         sparseMatrix = sparseMatrix.tocsr() #so it can be sliced later
         binSizeInt = int(coolerMatrix.binsize)
     except Exception as e:
+        traceback.print_exc()
+        print(coolerMatrix.chromnames)
         print(e)
     return sparseMatrix, binSizeInt
 
@@ -118,7 +125,7 @@ def scaleArray(pArray):
 def showMatrix(pMatrix):
     #test function to show matrices
     #debug only, not for production use
-    print(pMatrix.max())
+    # print(pMatrix.max())
     plotmatrix = pMatrix + 1
     plt.matshow(plotmatrix, cmap="Reds", norm=colors.LogNorm())
     plt.show()
@@ -283,7 +290,8 @@ def writeCooler(pMatrixList, pBinSizeInt, pOutfile, pChromosomeList, pChromSizeL
         bins_tmp['start'] = np.uint32(binStartList)
         bins_tmp['end'] = np.uint32(binEndList)
         bins_tmp["chrom"] = str(chrom)
-        bins = bins.append(bins_tmp, ignore_index=True)
+        bins = pd.concat([bins, bins_tmp], ignore_index=True)
+        # bins = bins.append(bins_tmp, ignore_index=True)
         offsetList.append(offsetList[-1] + bins_tmp.shape[0])
     #correct dtypes for joint dataframe
     bins["start"] = bins["start"].astype("uint32")
@@ -401,7 +409,6 @@ def clampArray(pArray):
         clampedArray[clampedArray < lowerClampingBound] = lowerClampingBound
         clampedArray[clampedArray > upperClampingBound] = upperClampingBound
     return clampedArray
-
 def computePearsonCorrelation(pCoolerFile1, pCoolerFile2, 
                               pWindowsize_bp,
                               pModelChromList, pTargetChromStr,
@@ -514,8 +521,8 @@ def computePearsonCorrelationSparse(pSparseCsrMatrix1, pSparseCsrMatrix2,
     pearsonAucScore = metrics.auc(pearsonAucIndices, pearsonAucValues)
     spearmanAucIncides, spearmanAucValues = getCorrelation(matrixDf,'distance', 'reads1', 'reads2', 'spearman')
     spearmanAucScore = metrics.auc(spearmanAucIncides, spearmanAucValues)
-    print("PearsonAUC: {:.3f}".format(pearsonAucScore))
-    print("SpearmanAUC: {:.3f}".format(spearmanAucScore))
+    # print("PearsonAUC: {:.3f}".format(pearsonAucScore))
+    # print("SpearmanAUC: {:.3f}".format(spearmanAucScore))
 
     columns = ["corrMeth", "modelChroms", "targetChrom", 
                            "modelCellLines", "targetCellLine", 
@@ -651,19 +658,50 @@ def getCorrelation(pData, pDistanceField, pTargetField, pPredictionField, pCorrM
         indices (list): integer list of index values 
         values (list): float list of correlation values
     """
+    # print(pData)
+    # pData.to_csv("data.csv")
+    # new = pData.groupby(pDistanceField, group_keys=False)[[pTargetField,
+    #     pPredictionField]].corr(method=pCorrMethod)
+    
+    # print(new)
 
-    new = pData.groupby(pDistanceField, group_keys=False)[[pTargetField,
-        pPredictionField]].corr(method=pCorrMethod)
-    new = new.iloc[0::2,-1]
-    #sometimes there is no variation in prediction / target per distance, then correlation is NaN
-    #need to drop these, otherwise AUC will be NaN, too.
-    new.dropna(inplace=True) 
-    values = new.values
-    indices = new.index.tolist()
-    indices = list(map(lambda x: x[0], indices))
-    indices = np.array(indices)
-    div = pData[pDistanceField].max()
-    indices = indices / div 
+    # new = new.iloc[0::2,-1]
+    # new.reset_index(drop=True, inplace=True)
+    # print(new)
+
+    # #sometimes there is no variation in prediction / target per distance, then correlation is NaN
+    # #need to drop these, otherwise AUC will be NaN, too.
+    # new.dropna(inplace=True) 
+    # values = new.values
+    # print(new)
+    # indices = new.index.tolist()
+    # indices = list(map(lambda x: x[0], indices))
+    # indices = np.array(indices, dtype=np.int32)
+    # div = pData[pDistanceField].max()
+    # indices = indices / div 
+    # return indices, values
+    correlation_matrix = pData.groupby(pDistanceField, group_keys=False)[[pTargetField, pPredictionField]].corr(method=pCorrMethod)
+
+    # Step 2: Extracting Relevant Correlation Values
+    correlation_values = correlation_matrix.iloc[0::2, -1].reset_index(drop=True)
+
+    # Step 3: Handling NaNs
+    correlation_values.dropna(inplace=True)
+
+    # Step 4: Preparing the Output
+    indices = correlation_values.index.tolist()
+    indices = np.array(indices, dtype=np.int32)
+    max_distance = pData[pDistanceField].max()
+    indices = indices / max_distance
+
+    values = correlation_values.values
+
+    # Print statements for debugging
+    # print(correlation_matrix)
+    # print(correlation_values)
+    # print(indices, values)
+
+    # Return the final indices and values
     return indices, values
 
 def getChromPrefixBigwig(pBigwigFileName):

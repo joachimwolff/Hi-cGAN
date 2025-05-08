@@ -4,7 +4,7 @@ import numpy as np
 import os
 import matplotlib.pyplot as plt 
 from tqdm import tqdm
-import utils
+from . import utils
 
 #implementation of adapted pix2pix cGAN
 #modified from tensorflow tutorial https://www.tensorflow.org/tutorials/generative/pix
@@ -26,13 +26,13 @@ class HiCGAN():
                     learning_rate_discriminator: float = 1e-6,
                     adam_beta_1: float = 0.5,
                     pretrained_model_path: str = "",
-                    embedding_model_type: str = "CNN"): 
+                    scope=None): 
         super().__init__()
 
         self.OUTPUT_CHANNELS = 1
         self.INPUT_CHANNELS = 1
         self.input_size = 256
-        if input_size in [64,128,256]:
+        if input_size in [64,128,256, 512]:
             self.input_size = input_size
         self.number_factors = number_factors
         self.loss_weight_pixel = loss_weight_pixel
@@ -42,19 +42,9 @@ class HiCGAN():
         self.loss_type_pixel = loss_type_pixel
         self.generator_optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate_generator, beta_1=adam_beta_1, name="Adam_Generator")
         self.discriminator_optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate_discriminator, beta_1=adam_beta_1, name="Adam_Discriminator")
-        #choose the desired embedding network: DNN (like Farre et al.) or CNN
-        if embedding_model_type not in ["DNN", "CNN", "mixed"]:
-            msg = "Embedding {:s} not supported".format(embedding_model_type)
-            raise NotImplementedError(msg)
-        if embedding_model_type == "DNN":
-            self.generator_embedding = self.dnn_embedding(pretrained_model_path=pretrained_model_path)
-            self.discriminator_embedding = self.dnn_embedding(pretrained_model_path=pretrained_model_path)
-        elif embedding_model_type == "mixed":
-            self.generator_embedding = self.dnn_embedding(pretrained_model_path=pretrained_model_path)
-            self.discriminator_embedding = self.cnn_embedding()
-        else:
-            self.generator_embedding = self.cnn_embedding()
-            self.discriminator_embedding = self.cnn_embedding()         
+
+        self.generator_embedding = self.cnn_embedding()
+        self.discriminator_embedding = self.cnn_embedding()         
         self.generator = self.Generator()
         self.discriminator = self.Discriminator()
 
@@ -89,6 +79,8 @@ class HiCGAN():
 
         self.__epoch_counter = 0
         self.__batch_counter = 0
+
+        self.scope = scope
 
     def cnn_embedding(self, nr_filters_list=[1024,512,512,256,256,128,128,64], kernel_width_list=[4,4,4,4,4,4,4,4], apply_dropout: bool = False):  
         inputs = tf.keras.layers.Input(shape=(3*self.input_size, self.number_factors))
@@ -126,42 +118,6 @@ class HiCGAN():
         #model.summary()
         return model
 
-    def dnn_embedding(self, pretrained_model_path : str = ""):
-        inputs = tf.keras.layers.Input(shape=(3*self.input_size, self.number_factors))
-        x = Conv1D(filters=1,
-                    kernel_size=1,
-                    strides=1, 
-                    padding="valid",
-                    data_format="channels_last",
-                    activation="sigmoid")(inputs)
-        x = Flatten(name="flatten_1")(x)
-        for i, nr_neurons in enumerate([460,881,1690]):
-            layerName = "dense_" + str(i+1)
-            x = Dense(nr_neurons, activation="relu", kernel_regularizer="l2", name=layerName)(x)
-            layerName = "dropout_" + str(i+1)
-            x = Dropout(0.1, name=layerName)(x)
-        nr_output_neurons = (self.input_size * (self.input_size + 1)) // 2
-        x = Dense(nr_output_neurons, activation="relu",kernel_regularizer="l2", name="dense_out")(x)
-        dnn_model = tf.keras.Model(inputs=inputs, outputs=x)
-        if pretrained_model_path != "":
-            try:
-                dnn_model.load_weights(pretrained_model_path)
-                print("model weights successfully loaded")
-            except Exception as e:
-                msg = str(e)
-                msg += "\nCould not load the weights of pre-trained model"
-                print(msg)
-        inputs2 = tf.keras.layers.Input(shape=(3*self.input_size, self.number_factors))
-        x = dnn_model(inputs2)
-        #place the upper triangular part from dnn model into full matrix
-        x = CustomReshapeLayer(self.input_size)(x)
-        #symmetrize the output
-        x_T = tf.keras.layers.Permute((2,1))(x)
-        diag = tf.keras.layers.Lambda(lambda z: -1*tf.linalg.band_part(z, 0, 0))(x)
-        x = tf.keras.layers.Add()([x, x_T, diag])
-        out = tf.keras.layers.Reshape((self.input_size, self.input_size, self.INPUT_CHANNELS))(x)
-        dnn_embedding = tf.keras.Model(inputs=inputs2, outputs=out, name="DNN-embedding")
-        return dnn_embedding
 
     @staticmethod
     def downsample(filters, size, apply_batchnorm=True):
@@ -321,9 +277,14 @@ class HiCGAN():
         total_disc_loss = self.loss_weight_discriminator * (real_loss + generated_loss)
         return total_disc_loss, real_loss, generated_loss
 
-
     @tf.function
-    def train_step(self, input_image, target, epoch):
+    def distributed_train_step(self, input_data):
+        input_image, target = input_data[0]["factorData"], input_data[1]["out_matrixData"]
+        per_replica_losses = self.scope.run(self.train_step, args=(input_image, target, ))
+        return self.scope.reduce(tf.distribute.ReduceOp.SUM, per_replica_losses, axis=None)
+    
+    @tf.function
+    def train_step(self, input_image, target):
         with tf.GradientTape() as gen_tape, tf.GradientTape() as disc_tape:
             gen_output = self.generator(input_image, training=True)
 
@@ -372,18 +333,24 @@ class HiCGAN():
         del fig1, axs1
 
     def fit(self, train_ds, epochs, test_ds, steps_per_epoch: int):
+        distributed_dataset = self.scope.experimental_distribute_dataset(train_ds)
+
         for epoch in range(epochs):
             #generate sample output
             if epoch % self.example_plot_frequency == 0:
                 for example_input, example_target in test_ds.take(1):
                     self.generate_images(self.generator, example_input, example_target, epoch)
-            # Train
-            train_pbar = tqdm(train_ds.enumerate(), total=steps_per_epoch)
+            
+            
+            train_pbar = tqdm(total=steps_per_epoch)
             train_pbar.set_description("Epoch {:05d}".format(epoch+1))
             train_samples_in_epoch = 0
-            for _, (input_image, target) in train_pbar:
+
+            for distributed_input in distributed_dataset:
+               
                 train_samples_in_epoch += 1
-                gen_loss, _, disc_loss_real, disc_loss_fake = self.train_step(input_image["factorData"], target["out_matrixData"], epoch)
+                gen_loss, _, disc_loss_real, disc_loss_fake = self.distributed_train_step(distributed_input)
+
                 self.__disc_train_loss_true_batches.append(disc_loss_real)
                 self.__disc_train_loss_fake_batches.append(disc_loss_fake)
                 self.__gen_train_loss_batches.append(gen_loss)
@@ -393,7 +360,9 @@ class HiCGAN():
                 if len(self.__gen_val_loss_epochs) > 0:
                     train_bar_postfixDict["v"] = "{:.3f}".format(self.__gen_val_loss_epochs[-1])
                 train_pbar.set_postfix( train_bar_postfixDict )
+                train_pbar.update(1)
                 self.__batch_counter += 1
+            train_pbar.close()
             self.__gen_train_loss_epochs.append(np.mean(self.__gen_train_loss_batches[-train_samples_in_epoch:]))
             self.__disc_train_loss_true_epochs.append(np.mean(self.__disc_train_loss_true_batches[-train_samples_in_epoch:]))
             self.__disc_train_loss_fake_epochs.append(np.mean(self.__disc_train_loss_fake_batches[-train_samples_in_epoch:]))
@@ -429,8 +398,8 @@ class HiCGAN():
                                     discLossTrain_True=self.__disc_train_loss_true_batches,
                                     discLossTrain_Fake=self.__disc_train_loss_fake_batches, 
                                     discLossVal=self.__disc_val_loss_batches)
-                self.generator.save(filepath=os.path.join(self.log_dir, "generator_{:05d}.h5".format(epoch)), save_format="h5")
-                self.discriminator.save(filepath=os.path.join(self.log_dir, "discriminator_{:05d}.h5".format(epoch)), save_format="h5")
+                self.generator.save(filepath=os.path.join(self.log_dir, "generator_{:05d}.keras".format(epoch)), save_format="keras")
+                self.discriminator.save(filepath=os.path.join(self.log_dir, "discriminator_{:05d}.keras".format(epoch)), save_format="keras")
 
 
         self.checkpoint.save(file_prefix = self.checkpoint_prefix)
@@ -449,18 +418,18 @@ class HiCGAN():
                                     discLossTrain_True=self.__disc_train_loss_true_batches,
                                     discLossTrain_Fake=self.__disc_train_loss_fake_batches, 
                                     discLossVal=self.__disc_val_loss_batches)
-        self.generator.save(filepath=os.path.join(self.log_dir, "generator_{:05d}.h5".format(epoch)), save_format="h5")
-        self.discriminator.save(filepath=os.path.join(self.log_dir, "discriminator_{:05d}.h5".format(epoch)), save_format="h5")
+        self.generator.save(filepath=os.path.join(self.log_dir, "generator_{:05d}.keras".format(epoch)), save_format="keras")
+        self.discriminator.save(filepath=os.path.join(self.log_dir, "discriminator_{:05d}.keras".format(epoch)), save_format="keras")
 
-    def plotModels(self, outputpath: str, figuretype: str):
-        generatorPlotName = "generatorModel.{:s}".format(figuretype)
-        generatorPlotName = os.path.join(outputpath, generatorPlotName)
-        discriminatorPlotName = "discriminatorModel.{:s}".format(figuretype)
-        discriminatorPlotName = os.path.join(outputpath, discriminatorPlotName)
-        generatorEmbeddingPlotName = "generatorEmbeddingModel.{:s}".format(figuretype)
-        generatorEmbeddingPlotName = os.path.join(outputpath, generatorEmbeddingPlotName)
-        discriminatorEmbeddingPlotName = "discriminatorEmbeddingModel.{:s}".format(figuretype)
-        discriminatorEmbeddingPlotName = os.path.join(outputpath, discriminatorEmbeddingPlotName)
+    def plotModels(self, pOutputPath: str, pFigureFileFormat: str):
+        generatorPlotName = "generatorModel.{:s}".format(pFigureFileFormat)
+        generatorPlotName = os.path.join(pOutputPath, generatorPlotName)
+        discriminatorPlotName = "discriminatorModel.{:s}".format(pFigureFileFormat)
+        discriminatorPlotName = os.path.join(pOutputPath, discriminatorPlotName)
+        generatorEmbeddingPlotName = "generatorEmbeddingModel.{:s}".format(pFigureFileFormat)
+        generatorEmbeddingPlotName = os.path.join(pOutputPath, generatorEmbeddingPlotName)
+        discriminatorEmbeddingPlotName = "discriminatorEmbeddingModel.{:s}".format(pFigureFileFormat)
+        discriminatorEmbeddingPlotName = os.path.join(pOutputPath, discriminatorEmbeddingPlotName)
         tf.keras.utils.plot_model(self.generator, show_shapes=True, to_file=generatorPlotName)
         tf.keras.utils.plot_model(self.discriminator, show_shapes=True, to_file=discriminatorPlotName)
         tf.keras.utils.plot_model(self.generator_embedding, show_shapes=True, to_file=generatorEmbeddingPlotName)
@@ -486,7 +455,7 @@ class HiCGAN():
         '''
         try:
             trainedModel = tf.keras.models.load_model(filepath=trainedModelPath, 
-                                                  custom_objects={"CustomReshapeLayer": CustomReshapeLayer(self.input_size)})
+                                                  custom_objects={"CustomReshapeLayer": CustomReshapeLayer(self.input_size)}, safe_mode=False)
             self.generator = trainedModel
         except Exception as e:
             msg = str(e)

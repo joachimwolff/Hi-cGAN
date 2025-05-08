@@ -1,23 +1,30 @@
-import utils
-import records
 import os
 import numpy as np
 from tensorflow import dtypes as tfdtypes
 from scipy.sparse import save_npz, csr_matrix
 from tqdm import tqdm
+import concurrent.futures
+
+from . import utils
+from . import records
+
+
+import logging
+log = logging.getLogger(__name__)
+
 
 class DataContainer():
-    def __init__(self, chromosome, matrixfilepath, chromatinFolder, binsize=None):
+    def __init__(self, chromosome, matrixFilePath, chromatinFolder, binSize=None):
         self.chromosome = str(chromosome)
-        self.matrixfilepath = matrixfilepath
+        self.matrixFilePath = matrixFilePath
         self.chromatinFolder = chromatinFolder
         self.FactorDataArray = None
         self.nr_factors = None
         self.sparseHiCMatrix = None
         self.sequenceArray = None
-        self.binsize = None
-        if matrixfilepath is None: #otherwise it will be defined by the Hi-C matrix itself upon loading
-            self.binsize = binsize
+        self.binSize = None
+        if matrixFilePath is None: #otherwise it will be defined by the Hi-C matrix itself upon loading
+            self.binSize = binSize
         self.factorNames = None
         self.prefixDict_factors = None
         self.prefixDict_matrix = None
@@ -26,18 +33,18 @@ class DataContainer():
         self.chromSize_matrix = None
         self.storedFeatures = None
         self.storedFiles = None
-        self.windowsize = None
-        self.flankingsize = None
-        self.maxdist = None
+        self.windowSize = None
+        self.flankingSize = None
+        self.maximumDistance = None
         self.data_loaded = False
 
     def __loadFactorData(self, ignoreChromLengths=False, scaleFeatures=False, clampFeatures=False):
         #load chromatin factor data from bigwig files
         if self.chromatinFolder is None:
             return
-        #ensure that binsizes for matrix (if given) and factors match
-        if self.binsize is None:
-            msg = "No binsize given; use a Hi-C matrix or explicitly specify binsize for the container"   
+        #ensure that binSizes for matrix (if given) and factors match
+        if self.binSize is None:
+            msg = "No binSize given; use a Hi-C matrix or explicitly specify binSize for the container"   
             raise TypeError(msg)
         ###load data for a specific chromsome
         #get the names of the bigwigfiles
@@ -81,42 +88,49 @@ class DataContainer():
         self.nr_factors = len(self.factorNames)
         self.prefixDict_factors = prefixDict_factors
         self.chromSize_factors = chromSize_factors
-        nr_bins = int( np.ceil(self.chromSize_factors / self.binsize) )
+        nr_bins = int( np.ceil(self.chromSize_factors / self.binSize) )
         self.FactorDataArray = np.empty(shape=(len(bigwigFileList),nr_bins))
         msg = "Loaded {:d} chromatin features from folder {:s}\n"
         msg = msg.format(self.nr_factors, self.chromatinFolder)
         featLoadedMsgList = [] #pretty printing for features loaded
-        for i, bigwigFile in enumerate(bigwigFileList):
+
+        def process_bigwig_file(bigwigFile):
             chromname = self.prefixDict_factors[bigwigFile] + self.chromosome
             tmpArray = utils.binChromatinFactor(pBigwigFileName=bigwigFile,
-                                                pBinSizeInt=self.binsize,
+                                                pBinSizeInt=self.binSize,
                                                 pChromStr=chromname,
                                                 pChromSize=self.chromSize_factors)
             if clampFeatures:
                 tmpArray = utils.clampArray(tmpArray)
             if scaleFeatures:
                 tmpArray = utils.scaleArray(tmpArray)
-            self.FactorDataArray[i] = tmpArray
-            nr_nonzero_abs = np.count_nonzero(tmpArray)
-            nr_nonzero_perc = nr_nonzero_abs / tmpArray.size * 100
-            msg2 = "{:s} - min. {:.3f} - max. {:.3f} - nnz. {:d} ({:.2f}%)"
-            msg2 = msg2.format(bigwigFile, tmpArray.min(), tmpArray.max(), nr_nonzero_abs, nr_nonzero_perc)
-            featLoadedMsgList.append(msg2)
+            return tmpArray
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = [executor.submit(process_bigwig_file, bigwigFile) for bigwigFile in bigwigFileList]
+            for i, future in enumerate(concurrent.futures.as_completed(futures)):
+                tmpArray = future.result()
+                self.FactorDataArray[i] = tmpArray
+                nr_nonzero_abs = np.count_nonzero(tmpArray)
+                nr_nonzero_perc = nr_nonzero_abs / tmpArray.size * 100
+                msg2 = "{:s} - min. {:.3f} - max. {:.3f} - nnz. {:d} ({:.2f}%)"
+                msg2 = msg2.format(bigwigFileList[i], tmpArray.min(), tmpArray.max(), nr_nonzero_abs, nr_nonzero_perc)
+                featLoadedMsgList.append(msg2)
         self.FactorDataArray = np.transpose(self.FactorDataArray)
         print(msg + "\n".join(featLoadedMsgList))
             
     def __loadMatrixData(self, scaleMatrix=False):
         #load Hi-C matrix from cooler file
-        if self.matrixfilepath is None:
+        if self.matrixFilePath is None:
             return
         try:
-            prefixDict_matrix = {self.matrixfilepath: utils.getChromPrefixCooler(self.matrixfilepath)}
-            chromname = prefixDict_matrix[self.matrixfilepath] + self.chromosome
-            chromsize_matrix = utils.getChromSizesFromCooler(self.matrixfilepath)[chromname]
-            sparseHiCMatrix, binsize = utils.getMatrixFromCooler(self.matrixfilepath, chromname)
+            prefixDict_matrix = {self.matrixFilePath: utils.getChromPrefixCooler(self.matrixFilePath)}
+            chromname = prefixDict_matrix[self.matrixFilePath] + self.chromosome
+            chromsize_matrix = utils.getChromSizesFromCooler(self.matrixFilePath)[chromname]
+            sparseHiCMatrix, binSize = utils.getMatrixFromCooler(self.matrixFilePath, chromname)
         except:
             msg = "Error: Could not load data from Hi-C matrix {:s}"
-            msg = msg.format(self.matrixfilepath)
+            msg = msg.format(self.matrixFilePath)
             raise IOError(msg)
         #scale to 0..1, if requested
         if scaleMatrix:
@@ -128,16 +142,16 @@ class DataContainer():
             msg = msg.format(chromsize_matrix, self.chromSize_factors)
             raise IOError(msg)
         self.chromSize_matrix = chromsize_matrix
-        #ensure that binsizes for matrix and factors (if given) match
-        if self.binsize is None or self.binsize == binsize:
-            self.binsize = binsize
+        #ensure that binSizes for matrix and factors (if given) match
+        if self.binSize is None or self.binSize == binSize:
+            self.binSize = binSize
             self.sparseHiCMatrix = sparseHiCMatrix
-        elif self.binsize is not None and self.binsize != binsize:
-            msg = "Matrix has wrong binsize\n"
+        elif self.binSize is not None and self.binSize != binSize:
+            msg = "Matrix has wrong binSize\n"
             msg += "Matrix: {:d} -- Binned chromatin factors {:d}"
-            msg = msg.format(binsize, self.binsize)
+            msg = msg.format(binSize, self.binSize)
             raise IOError(msg)
-        msg = "Loaded cooler matrix {:s}\n".format(self.matrixfilepath)
+        msg = "Loaded cooler matrix {:s}\n".format(self.matrixFilePath)
         msg += "chr. {:s}, matshape {:d}*{:d} -- min. {:d} -- max. {:d} -- nnz. {:d}"
         msg = msg.format(self.chromosome, self.sparseHiCMatrix.shape[0], self.sparseHiCMatrix.shape[1], int(self.sparseHiCMatrix.min()), int(self.sparseHiCMatrix.max()), self.sparseHiCMatrix.getnnz() )
         print(msg)
@@ -154,22 +168,22 @@ class DataContainer():
         #unload all data to save memory, but do not touch metadata
         self.__unloadFactorData
         self.__unloadMatrixData
-        self.windowsize = None
-        self.flankingsize = None
-        self.maxdist = None
+        self.windowSize = None
+        self.flankingSize = None
+        self.maximumDistance = None
         self.data_loaded = False
     
-    def loadData(self, windowsize, flankingsize=None, maxdist=None, scaleFeatures=False, clampFeatures=False, scaleTargets=False):
-        if not isinstance(windowsize, int):
-            msg = "windowsize must be integer"
+    def loadData(self, windowSize, flankingSize=None, maximumDistance=None, scaleFeatures=False, clampFeatures=False, scaleTargets=False):
+        if not isinstance(windowSize, int):
+            msg = "windowSize must be integer"
             raise TypeError(msg)
-        if isinstance(maxdist, int):
-            maxdist = np.clip(maxdist, a_min=1, a_max=self.windowsize)
+        if isinstance(maximumDistance, int):
+            maximumDistance = np.clip(maximumDistance, a_min=1, a_max=self.windowSize)
         self.__loadMatrixData(scaleMatrix=scaleTargets)
         self.__loadFactorData(scaleFeatures=scaleFeatures, clampFeatures=clampFeatures)
-        self.windowsize = windowsize
-        self.flankingsize = flankingsize
-        self.maxdist = maxdist
+        self.windowSize = windowSize
+        self.flankingSize = flankingSize
+        self.maximumDistance = maximumDistance
         self.data_loaded = True
 
     def checkCompatibility(self, containerIterable):
@@ -189,10 +203,13 @@ class DataContainer():
         #check if the same kind of data is available for all containers
         factorsOK = type(self.FactorDataArray) == type(container.FactorDataArray)
         matrixOK = type(self.sparseHiCMatrix) == type(container.sparseHiCMatrix)
-        #check if windowsize, flankingsize and maxdist match
-        windowsizeOK = self.windowsize == container.windowsize
-        flankingsizeOK = self.flankingsize == container.flankingsize
-        maxdistOK = self.maxdist == container.maxdist
+        #check if windowSize, flankingSize and maximumDistance match
+        windowSizeOK = self.windowSize == container.windowSize
+        flankingSizeOK = self.flankingSize == container.flankingSize
+        maximumDistanceOK = self.maximumDistance == container.maximumDistance
+        log.debug("Factors: {:s} -- Matrix: {:s} -- windowSize: {:s} -- flankingSize: {:s} -- maximumDistance: {:s}".format(str(factorsOK), str(matrixOK), str(windowSizeOK), str(flankingSizeOK), str(maximumDistanceOK)))
+        log.debug("Chromatin folder: {:s} -- Nr. factors: {:s}".format(str(self.chromatinFolder), str(self.nr_factors)))
+        log.debug("Chromatin folder: {:s} -- Nr. factors: {:s}".format(str(container.chromatinFolder), str(container.nr_factors)))
         #sanity check loading of bigwig files
         if self.chromatinFolder is not None and self.nr_factors is None:
             return False
@@ -200,18 +217,20 @@ class DataContainer():
             return False
         #if chromatin factors are present, the numbers and names of chromatin factors must match
         factorsOK = factorsOK and (self.nr_factors == container.nr_factors)
-        factorsOK = factorsOK and (self.factorNames == container.factorNames)
-        return factorsOK and matrixOK and windowsizeOK and flankingsizeOK and maxdistOK
+        # factorsOK = factorsOK and (self.factorNames == container.factorNames)
+        log.debug("self.nr_factors: {:d} -- container.nr_factors: {:d}".format(self.nr_factors, container.nr_factors))
+        log.debug("self.factorNames: {:s} -- container.factorNames: {:s}".format(str(self.factorNames), str(container.factorNames)))
+        return factorsOK and matrixOK and windowSizeOK and flankingSizeOK and maximumDistanceOK
         
-    def writeTFRecord(self, pOutfolder, pRecordSize=None):
+    def writeTFRecord(self, pOutputFolder, pRecordSize=None):
         '''
         Write a dataset to disk in tensorflow TFRecord format
         
         Parameters:
-            pWindowsize (int): size of submatrices
+            pwindowSize (int): size of submatrices
             pOutfolder (str): directory where TFRecords will be written
-            pFlankingsize (int): size of flanking regions left/right of submatrices
-            pMaxdist (int): cut the matrices off at this distance (in bins)
+            pflankingSize (int): size of flanking regions left/right of submatrices
+            pmaximumDistance (int): cut the matrices off at this distance (in bins)
             pRecordsize (int): split the TFRecords into multiple files containing approximately this number of samples
         
         Returns:
@@ -234,13 +253,27 @@ class DataContainer():
         samples_per_file = [target_ct]*(nr_files-1) + [nr_samples-(nr_files-1)*target_ct]
         sample_indices = [sum(samples_per_file[0:i]) for i in range(len(samples_per_file)+1)] 
         #write the single files
-        folderName = self.chromatinFolder.rstrip("/").replace("/","-")
-        recordfiles = [os.path.join(pOutfolder, "{:s}_{:s}_{:03d}.tfrecord".format(folderName, str(self.chromosome), i + 1)) for i in range(nr_files)]
-        for recordfile, firstIndex, lastIndex in tqdm(zip(recordfiles, sample_indices, sample_indices[1:]), desc="Storing TFRecord files", total=len(recordfiles)):
+        folderName = self.chromatinFolder.strip("/").replace("/","_")
+        recordfiles = [os.path.join(pOutputFolder, "{:s}_{:s}_{:03d}.tfrecord".format(folderName, str(self.chromosome), i + 1)) for i in range(nr_files)]
+
+        def storeTFRecord(recordfile, firstIndex, lastIndex, outfolder):
+            log.debug("Prepare dict...")
             recordDict, storedFeaturesDict = self.__prepareWriteoutDict(pFirstIndex=firstIndex, 
                                                                         pLastIndex=lastIndex, 
-                                                                        pOutfolder=pOutfolder)
+                                                                        pOutfolder=outfolder)
+            log.debug("Prepare dict... DONE!")
+            log.debug("Write TFRecord...")
             records.writeTFRecord(pFilename=recordfile, pRecordDict=recordDict)
+            log.debug("Write TFRecord... DONE!")
+
+            return storedFeaturesDict
+
+        storedFeaturesDictList = []
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            results = [executor.submit(storeTFRecord, recordfile, firstIndex, lastIndex, pOutputFolder) for recordfile, firstIndex, lastIndex in zip(recordfiles, sample_indices, sample_indices[1:])]
+            for future in concurrent.futures.as_completed(results):
+                storedFeaturesDict = future.result()
+                storedFeaturesDictList.append(storedFeaturesDict)
         self.storedFiles = recordfiles
         self.storedFeatures = storedFeaturesDict
         return recordfiles
@@ -249,7 +282,7 @@ class DataContainer():
         if not self.data_loaded:
             return None
         featureArrays = [self.FactorDataArray, self.sparseHiCMatrix, self.sequenceArray]
-        cutouts = [self.windowsize+2*self.flankingsize, self.windowsize+2*self.flankingsize, (self.windowsize+2*self.flankingsize)*self.binsize]
+        cutouts = [self.windowSize+2*self.flankingSize, self.windowSize+2*self.flankingSize, (self.windowSize+2*self.flankingSize)*self.binSize]
         nr_samples_list = []
         for featureArray, cutout in zip(featureArrays, cutouts):
             if featureArray is not None:
@@ -263,19 +296,19 @@ class DataContainer():
         return max(nr_samples_list)
 
     def __getMatrixData(self, idx):
-        if self.matrixfilepath is None:
+        if self.matrixFilePath is None:
             return None # this can't work
         if not self.data_loaded:
             msg = "Error: Load data first"
             raise RuntimeError(msg)
-        #the 0-th matrix starts flankingsize away from the boundary
-        windowsize = self.windowsize
-        flankingsize = self.flankingsize
-        if flankingsize is None:
-            flankingsize = windowsize
-            self.flankingsize = windowsize
-        startInd = idx + flankingsize
-        stopInd = startInd + windowsize
+        #the 0-th matrix starts flankingSize away from the boundary
+        windowSize = self.windowSize
+        flankingSize = self.flankingSize
+        if flankingSize is None:
+            flankingSize = windowSize
+            self.flankingSize = windowSize
+        startInd = idx + flankingSize
+        stopInd = startInd + windowSize
         trainmatrix = self.sparseHiCMatrix[startInd:stopInd,startInd:stopInd].todense()
         trainmatrix = np.array(np.nan_to_num(trainmatrix))
         trainmatrix = np.expand_dims(trainmatrix, axis=-1) #make Hi-C (sub-)matrix an RGB image
@@ -288,13 +321,13 @@ class DataContainer():
             msg = "Error: Load data first"
             raise RuntimeError(msg)
         #the 0-th feature matrix starts at position 0
-        windowsize = self.windowsize
-        flankingsize = self.flankingsize
-        if flankingsize is None:
-            flankingsize = windowsize
-            self.flankingsize = windowsize
+        windowSize = self.windowSize
+        flankingSize = self.flankingSize
+        if flankingSize is None:
+            flankingSize = windowSize
+            self.flankingSize = windowSize
         startIdx = idx
-        endIdx = startIdx + 2*flankingsize + windowsize
+        endIdx = startIdx + 2*flankingSize + windowSize
         factorArray = self.FactorDataArray[startIdx:endIdx]
         factorArray = np.expand_dims(factorArray, axis=-1)
         return factorArray
@@ -328,7 +361,7 @@ class DataContainer():
                                         pFeatureNameList=self.factorNames,
                                         pChromatinFolder=self.chromatinFolder,
                                         pChrom=self.chromosome,
-                                        pBinsize=self.binsize,
+                                        pbinSize=self.binSize,
                                         pStartbin=startBin,
                                         pOutputPath=outpath,
                                         pPlotType=plotType,
@@ -345,7 +378,7 @@ class DataContainer():
             raise ValueError(msg)
         #compute the bin index from the position
         elif isinstance(position, int):
-            idx = int(np.floor(position / self.binsize))
+            idx = int(np.floor(position / self.binSize))
         else:
             idx = None
         return self.plotFeatureAtIndex(idx=idx,
@@ -358,17 +391,17 @@ class DataContainer():
             print(msg)
             return
         sparseMatrix = None
-        windowsize = self.windowsize
-        flankingsize = self.flankingsize
-        if not isinstance(flankingsize, int):
-            flankingsize = windowsize
-        if isinstance(self.maxdist, int) and self.maxdist < windowsize and self.maxdist > 0:
-            maxdist = self.maxdist
+        windowSize = self.windowSize
+        flankingSize = self.flankingSize
+        if not isinstance(flankingSize, int):
+            flankingSize = windowSize
+        if isinstance(self.maximumDistance, int) and self.maximumDistance < windowSize and self.maximumDistance > 0:
+            maximumDistance = self.maximumDistance
         else:
-            maxdist = windowsize
+            maximumDistance = windowSize
         if isinstance(index, int) and index < self.getNumberSamples():
-            tmpMat = np.zeros(shape=(windowsize, windowsize))
-            indices = np.mask_indices(windowsize, utils.maskFunc, k=maxdist)
+            tmpMat = np.zeros(shape=(windowSize, windowSize))
+            indices = np.mask_indices(windowSize, utils.maskFunc, k=maximumDistance)
             tmpMat[indices] = self.__getMatrixData(idx=index)
             sparseMatrix = csr_matrix(tmpMat)
         else:
@@ -382,15 +415,30 @@ class DataContainer():
         if not self.data_loaded:
             msg = "Error: no data loaded, nothing to prepare"
             raise RuntimeError(msg)
-        data = [ self.getSampleData(idx=i) for i in range(pFirstIndex, pLastIndex) ]
+
+        def get_sample_data(idx):
+            return self.getSampleData(idx=idx)
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            data = list(executor.map(get_sample_data, range(pFirstIndex, pLastIndex)))
         recordDict = dict()
         storedFeaturesDict = dict()
         if len(data) < 1:
             msg = "Error: No data to write"
             raise RuntimeError(msg)
+
         for key in data[0]:
             featData = [feature[key] for feature in data]
             if not any(elem is None for elem in featData):
                 recordDict[key] = np.array(featData)
                 storedFeaturesDict[key] = {"shape": recordDict[key].shape[1:], "dtype": tfdtypes.as_dtype(recordDict[key].dtype)}
+
+        def process_feature(key):
+            featData = [feature[key] for feature in data]
+            if not any(elem is None for elem in featData):
+                recordDict[key] = np.array(featData)
+                storedFeaturesDict[key] = {"shape": recordDict[key].shape[1:], "dtype": tfdtypes.as_dtype(recordDict[key].dtype)}
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            executor.map(process_feature, data[0].keys())
         return recordDict, storedFeaturesDict
