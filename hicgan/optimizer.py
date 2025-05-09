@@ -74,15 +74,6 @@ def parse_arguments(args=None):
     parser.add_argument("--validationChromosomesFolders", "-vcp", required=True,
                         type=str, nargs='+',
                         help="Path where chromatin factors for validation reside (bigwig files).")
-    parser.add_argument("--testMatrices", "-tem", required=True,
-                        type=str, nargs='+',
-                        help="mcooler matrices for test.")
-    parser.add_argument("--testChromosomes", "-techroms", required=True,
-                        type=str, nargs='+',
-                        help="Test chromosomes. Must be present in all train matrices.")
-    parser.add_argument("--testChromosomesFolders", "-tecp", required=True,
-                        type=str, nargs='+',
-                        help="Path where chromatin factors for test reside (bigwig files).")
 
     parser.add_argument("--originalDataMatrix", "-odm", required=True,
                         type=str,
@@ -294,7 +285,7 @@ def objective(config, pArgs):
 
         log.debug("COmpute TADs predicted")
         os.makedirs(os.path.join(pArgs.outputFolder, trial_id, "tads_predicted"), exist_ok=True)
-        chromosomes = ' '.join(pArgs.testChromosomes)
+        chromosomes = ' '.join(pArgs.predictionChromosomes)
         arguments_tad = "--matrix {} --minDepth {} --maxDepth {} --step {} --numberOfProcessors {}  \
                         --outPrefix {} --minBoundaryDistance {} \
                         --correctForMultipleTesting fdr --thresholdComparisons 0.5 --chromosomes {}".format(os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), pArgs.binSize * 3, pArgs.binSize * 10, pArgs.binSize, 1,
@@ -313,7 +304,7 @@ def objective(config, pArgs):
         
         os.makedirs(os.path.join(pArgs.outputFolder, trial_id, "tads_original"), exist_ok=True)
 
-        chromosomes = ' '.join(pArgs.testChromosomes)
+        chromosomes = ' '.join(pArgs.predictionChromosomes)
         arguments_tad = "--matrix {} --minDepth {} --maxDepth {} --step {} --numberOfProcessors {}  \
                             --outPrefix {} --minBoundaryDistance {} \
                             --correctForMultipleTesting fdr --thresholdComparisons 0.5 --chromosomes {}".format(pArgs.originalDataMatrix, pArgs.binSize * 3, pArgs.binSize * 10, pArgs.binSize, 1,
@@ -342,7 +333,7 @@ def objective(config, pArgs):
             
             if correlationMethod == 'pearson_spearman':
                 log.debug("Compute pearson spearman")
-                for chrom in pArgs.testChromosomes:
+                for chrom in pArgs.predictionChromosomes:
                     # activate_lock_or_wait(lock_file_pearson_path, method="Pearson correlation")
                     score_dataframe = computePearsonCorrelation(pCoolerFile1=os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), pCoolerFile2=pArgs.originalDataMatrix,
                                                             pWindowsize_bp=pArgs.correlationDepth, pModelChromList=pArgs.trainingChromosomes, pTargetChromStr=chrom,
@@ -358,7 +349,7 @@ def objective(config, pArgs):
 
                 for correlationMethod_ in ['pearson', 'spearman']:
                     for errorType_ in errorType:
-                        score_dict[correlationMethod_ + '_' + errorType_][0] = score_dict[correlationMethod_ + '_' + errorType_][0] / len(pArgs.testChromosomes)
+                        score_dict[correlationMethod_ + '_' + errorType_][0] = score_dict[correlationMethod_ + '_' + errorType_][0] / len(pArgs.predictionChromosomes)
 
             elif correlationMethod == 'hicrep':
                 try:
@@ -383,7 +374,7 @@ def objective(config, pArgs):
 
                     # Optionally you can get SCC score from a subset of chromosomes
                     sccSub = hicrepSCC(cool1, cool2, h, dBPMax,
-                                    bDownSample, pArgs.testChromosomes)
+                                    bDownSample, pArgs.predictionChromosomes)
                     # removeLock(lock_file_hicrep_path)
                     score_dict[correlationMethod] = [np.mean(sccSub)]
                 except Exception as e:
