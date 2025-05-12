@@ -26,9 +26,9 @@ def parse_arguments(args=None):
     parser.add_argument("--trainingChromosomes", "-tchroms", required=True,
                         type=str, nargs='+',
                         help="Train chromosomes. Must be present in all train matrices.")
-    parser.add_argument("--trainingChromosomesFolders", "-tcp", required=True,
+    parser.add_argument("--trainingChromatinFolders", "-tcp", required=True,
                         type=str, nargs='+',
-                        help="Path where chromatin factors for training reside (bigwig files).")
+                        help="Path where chromatin factors for training reside (bigwig files). Alternatively, a list of single bigwig paths can be provided.")
     parser.add_argument("--validationMatrices", "-vm", required=True,
                         type=str, nargs='+',
                         help="Cooler matrices for validation.")
@@ -117,7 +117,7 @@ def create_container(chrom, matrix, chromatinpath):
 
 def create_data(pTrainingMatrices, 
                 pTrainingChromosomes, 
-                pTrainingChromosomesFolders, 
+                pTrainingChromatinFolders, 
                 pValidationMatrices, 
                 pValidationChromosomes, 
                 pValidationChromosomesFolders,
@@ -148,34 +148,56 @@ def create_data(pTrainingMatrices,
     paramDict["valChromNameList"] = valChromNameList
 
     #ensure there are as many matrices as chromatin paths
-    if len(pTrainingMatrices) != len(pTrainingChromosomesFolders):
-        msg = "Number of train matrices and chromatin paths must match\n"
-        msg += "Current numbers: Matrices: {:d}; Chromatin Paths: {:d}"
-        msg = msg.format(len(pTrainingMatrices), len(pTrainingChromosomesFolders))
-        raise SystemExit(msg)
-    if len(pValidationMatrices) != len(pValidationChromosomesFolders):
-        msg = "Number of validation matrices and chromatin paths must match\n"
-        msg += "Current numbers: Matrices: {:d}; Chromatin Paths: {:d}"
-        msg = msg.format(len(pValidationMatrices), len(pValidationChromosomesFolders))
-        raise SystemExit(msg)
+    trainingChromatinIsFolder = False
+    for folder in pTrainingChromatinFolders:
+        if os.path.isdir(folder):
+            trainingChromatinIsFolder = True
+            break
+    validationChromatinIsFolder = False
+    for folder in pValidationChromosomesFolders:
+        if os.path.isdir(folder):
+            validationChromatinIsFolder = True
+            break
+    if trainingChromatinIsFolder:
+        if len(pTrainingMatrices) != len(pTrainingChromatinFolders):
+            msg = "Number of train matrices and chromatin paths must match\n"
+            msg += "Current numbers: Matrices: {:d}; Chromatin Paths: {:d}"
+            msg = msg.format(len(pTrainingMatrices), len(pTrainingChromatinFolders))
+            raise SystemExit(msg)
+    if validationChromatinIsFolder:   
+        if len(pValidationMatrices) != len(pValidationChromosomesFolders):
+            msg = "Number of validation matrices and chromatin paths must match\n"
+            msg += "Current numbers: Matrices: {:d}; Chromatin Paths: {:d}"
+            msg = msg.format(len(pValidationMatrices), len(pValidationChromosomesFolders))
+            raise SystemExit(msg)
 
     #prepare the training data containers. No data is loaded yet.
     traindataContainerList = []
 
     with concurrent.futures.ProcessPoolExecutor() as executor:
         for chrom in trainChromNameList:
-            for matrix, chromatinpath in zip(pTrainingMatrices, pTrainingChromosomesFolders):
-                future = executor.submit(create_container, chrom, matrix, chromatinpath)
-                traindataContainerList.append(future.result())
+            if trainingChromatinIsFolder:
+                for matrix, chromatinpath in zip(pTrainingMatrices, pTrainingChromatinFolders):
+                    future = executor.submit(create_container, chrom, matrix, chromatinpath)
+                    traindataContainerList.append(future.result())
+            else:
+                for matrix in pTrainingMatrices:
+                    future = executor.submit(create_container, chrom, matrix, pTrainingChromatinFolders)
+                    traindataContainerList.append(future.result())
 
     #prepare the validation data containers. No data is loaded yet.
     valdataContainerList = []
 
     with concurrent.futures.ProcessPoolExecutor() as executor:
         for chrom in valChromNameList:
-            for matrix, chromatinpath in zip(pValidationMatrices, pValidationChromosomesFolders):
-                future = executor.submit(create_container, chrom, matrix, chromatinpath)
-                valdataContainerList.append(future.result())
+            if validationChromatinIsFolder:
+                for matrix, chromatinpath in zip(pValidationMatrices, pValidationChromosomesFolders):
+                    future = executor.submit(create_container, chrom, matrix, chromatinpath)
+                    valdataContainerList.append(future.result())
+            else:
+                for matrix in pValidationMatrices:
+                    future = executor.submit(create_container, chrom, matrix, pValidationChromosomesFolders)
+                    valdataContainerList.append(future.result())
 
     #define the load params for the containers
     loadParams = {"scaleFeatures": True,
@@ -366,7 +388,7 @@ def main(args=None):
     with strategy.scope() as scope: 
         tfRecordFilenames, traindataContainerListLength, nr_samples_list, storedFeatures, nr_factors = create_data(args.trainingMatrices, 
                     args.trainingChromosomes, 
-                    args.trainingChromosomesFolders, 
+                    args.trainingChromatinFolders, 
                     args.validationMatrices, 
                     args.validationChromosomes, 
                     args.validationChromosomesFolders,

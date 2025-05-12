@@ -48,8 +48,15 @@ class DataContainer():
             raise TypeError(msg)
         ###load data for a specific chromsome
         #get the names of the bigwigfiles
-        bigwigFileList = utils.getBigwigFileList(self.chromatinFolder)
-        bigwigFileList = sorted(bigwigFileList)
+        chromatinIsFolder = os.path.isdir(self.chromatinFolder)
+        if not os.path.isdir(self.chromatinFolder) or not os.listdir(self.chromatinFolder):
+            raise OSError(f"Chromatin folder '{self.chromatinFolder}' does not exist or is empty.")
+        
+        if chromatinIsFolder:
+            bigwigFileList = utils.getBigwigFileList(self.chromatinFolder)
+            bigwigFileList = sorted(bigwigFileList)
+        else:
+            bigwigFileList = sorted(self.chromatinFolder)
         if len(bigwigFileList) is None:
             msg = "Warning: folder {:s} does not contain any bigwig files"
             msg = msg.format(self.chromatinFolder)

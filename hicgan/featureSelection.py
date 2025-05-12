@@ -250,32 +250,7 @@ def main(args=None):
     for i, training_files in enumerate(combined_files):
         print(f"Training and prediction with combination {i+1}/{len(combined_files)}: {training_files}\n\n")
         # exit(0)
-        new_folder_training = os.path.join(args.outputFolder, f"data_links_{i}", "training")
-        new_folder_validation = os.path.join(args.outputFolder, f"data_links_{i}", "validation")
-        new_folder_prediction = os.path.join(args.outputFolder, f"data_links_{i}", "prediction")
-
-
-        os.makedirs(new_folder_training, exist_ok=True)
-        os.makedirs(new_folder_validation, exist_ok=True)
-        os.makedirs(new_folder_prediction, exist_ok=True)
-        for orig_file in training_files:
-            link_path = os.path.join(new_folder_training, os.path.basename(orig_file))
-            print(f"Creating symlink: {link_path} -> {orig_file}")
-            if not os.path.lexists(link_path):
-                os.symlink(orig_file, link_path)
-            
-            link_path = os.path.join(new_folder_validation, os.path.basename(orig_file))
-            print(f"Creating symlink: {link_path} -> {os.path.join(args.validationChromatinFactorFolder[0], os.path.basename(orig_file))}")
-            if not os.path.lexists(link_path):
-                # if os.path.islink(link_path) or os.path.exists(link_path):
-                #     os.remove(link_path)
-                os.symlink(os.path.join(args.validationChromatinFactorFolder[0], os.path.basename(orig_file)), link_path)
-
-            link_path = os.path.join(new_folder_prediction, os.path.basename(orig_file))
-            print(f"Creating symlink: {link_path} -> {os.path.join(args.predictionChromatinFactorFolder[0], os.path.basename(orig_file))}")
-            print("link_path {} {}".format(link_path, os.path.lexists(link_path)))
-            if not os.path.lexists(link_path):
-                os.symlink(os.path.join(args.predictionChromatinFactorFolder[0], os.path.basename(orig_file)), link_path)
+       
 
         args.trainingChromatinFactorFolder = new_folder_training
         args.whichGPU = (i % len(gpu))
