@@ -120,7 +120,7 @@ def create_data(pTrainingMatrices,
                 pTrainingChromatinFolders, 
                 pValidationMatrices, 
                 pValidationChromosomes, 
-                pValidationChromosomesFolders,
+                pValidationChromatinFolders,
                 pWindowSize,
                 pOutputFolder,
                 pBatchSize,
@@ -154,7 +154,7 @@ def create_data(pTrainingMatrices,
             trainingChromatinIsFolder = True
             break
     validationChromatinIsFolder = False
-    for folder in pValidationChromosomesFolders:
+    for folder in pValidationChromatinFolders:
         if os.path.isdir(folder):
             validationChromatinIsFolder = True
             break
@@ -165,10 +165,10 @@ def create_data(pTrainingMatrices,
             msg = msg.format(len(pTrainingMatrices), len(pTrainingChromatinFolders))
             raise SystemExit(msg)
     if validationChromatinIsFolder:   
-        if len(pValidationMatrices) != len(pValidationChromosomesFolders):
+        if len(pValidationMatrices) != len(pValidationChromatinFolders):
             msg = "Number of validation matrices and chromatin paths must match\n"
             msg += "Current numbers: Matrices: {:d}; Chromatin Paths: {:d}"
-            msg = msg.format(len(pValidationMatrices), len(pValidationChromosomesFolders))
+            msg = msg.format(len(pValidationMatrices), len(pValidationChromatinFolders))
             raise SystemExit(msg)
 
     #prepare the training data containers. No data is loaded yet.
@@ -191,12 +191,12 @@ def create_data(pTrainingMatrices,
     with concurrent.futures.ProcessPoolExecutor() as executor:
         for chrom in valChromNameList:
             if validationChromatinIsFolder:
-                for matrix, chromatinpath in zip(pValidationMatrices, pValidationChromosomesFolders):
+                for matrix, chromatinpath in zip(pValidationMatrices, pValidationChromatinFolders):
                     future = executor.submit(create_container, chrom, matrix, chromatinpath)
                     valdataContainerList.append(future.result())
             else:
                 for matrix in pValidationMatrices:
-                    future = executor.submit(create_container, chrom, matrix, pValidationChromosomesFolders)
+                    future = executor.submit(create_container, chrom, matrix, pValidationChromatinFolders)
                     valdataContainerList.append(future.result())
 
     #define the load params for the containers

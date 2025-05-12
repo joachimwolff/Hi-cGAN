@@ -18,7 +18,7 @@ def parse_arguments(args=None):
     parser.add_argument("--trainedModel", "-trm", required=False,
                         type=str,
                         help="Trained generator model to predict from")
-    parser.add_argument("--predictionChromosomesFolders", "-tcp", required=False,
+    parser.add_argument("--predictionChromatinFolders", "-tcp", required=False,
                         type=str,
                         help="Path where test data (bigwig files) resides")
     parser.add_argument("--predictionChromosomes", "-pc", required=False,
@@ -56,9 +56,9 @@ def parse_arguments(args=None):
                            version='%(prog)s {}'.format(__version__))
     return parser
 
-def prediction(pTrainedModel, pPredictionChromosomesFolders, pPredictionChromosomes, pOutputFolder, pMultiplier, pBinSize, pBatchSize, pWindowSize, pMatrixOutputName, pParameterOutputFile):
+def prediction(pTrainedModel, pPredictionChromatinFolders, pPredictionChromosomes, pOutputFolder, pMultiplier, pBinSize, pBatchSize, pWindowSize, pMatrixOutputName, pParameterOutputFile):
     trainedmodel = pTrainedModel
-    predictionChromosomesFolders = pPredictionChromosomesFolders
+    predictionChromatinFolders = pPredictionChromatinFolders
     predictionChromosomes = pPredictionChromosomes
     outputFolder = pOutputFolder
     multiplier = pMultiplier
@@ -84,7 +84,7 @@ def prediction(pTrainedModel, pPredictionChromosomesFolders, pPredictionChromoso
     for chrom in chromNameList:
         testdataContainerList.append(containerCls(chromosome=chrom,
                                                   matrixFilePath=None,
-                                                  chromatinFolder=predictionChromosomesFolders,
+                                                  chromatinData=predictionChromatinFolders,
                                                   binSize=binSize)) 
     loadParams = {"scaleFeatures": scalefactors,
                   "clampFeatures": clampfactors,
@@ -155,7 +155,7 @@ def main(args=None):
     args = parse_arguments().parse_args(args)
     # print(args)
     prediction(pTrainedModel=args.trainedModel,
-        pPredictionChromosomesFolders=args.predictionChromosomesFolders,
+        pPredictionChromatinFolders=args.predictionChromatinFolders,
         pPredictionChromosomes=args.predictionChromosomes,
         pOutputFolder=args.outputFolder,
         pMultiplier=args.multiplier,
