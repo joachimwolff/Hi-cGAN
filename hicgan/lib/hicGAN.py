@@ -5,6 +5,7 @@ import os
 import matplotlib.pyplot as plt 
 from tqdm import tqdm
 from . import utils
+from tensorflow.keras import mixed_precision
 
 #implementation of adapted pix2pix cGAN
 #modified from tensorflow tutorial https://www.tensorflow.org/tutorials/generative/pix
@@ -81,6 +82,12 @@ class HiCGAN():
         self.__batch_counter = 0
 
         self.scope = scope
+        mixed_precision.set_global_policy('mixed_float16')
+        # mixed_precision.set_global_policy('mixed_bfloat16')
+        from tensorflow.python.client import device_lib
+        print(device_lib.list_local_devices())
+
+        
 
     def cnn_embedding(self, nr_filters_list=[1024,512,512,256,256,128,128,64], kernel_width_list=[4,4,4,4,4,4,4,4], apply_dropout: bool = False):  
         inputs = tf.keras.layers.Input(shape=(3*self.input_size, self.number_factors))
