@@ -322,8 +322,13 @@ def plotChromatinFactors(pFactorArray, pFeatureNameList,
         plotFn = plotChromatinFactors_lineplots
     else:
         return
- 
-    filename = "chromFactors_{:s}_{:s}_{:s}.{:s}".format(pPlotType, pChromatinFolder.rstrip("/").replace("/","-"), str(pChrom), pFigureType)
+    
+    if isinstance(pChromatinFolder, str):
+        filename = "chromFactors_{:s}_{:s}_{:s}.{:s}".format(pPlotType, pChromatinFolder.rstrip("/").replace("/","-"), str(pChrom), pFigureType)
+        plotTitle = "Chromosome {:s} | Dir. {:s}".format(str(pChrom),pChromatinFolder)
+    else:
+        filename = "chromFactors_{:s}_{:s}.{:s}".format(pPlotType, str(pChrom), pFigureType)
+        plotTitle = "Chromosome {:s}".format(str(pChrom))
     filename = os.path.join(pOutputPath,filename)
     plotTitle = "Chromosome {:s} | Dir. {:s}".format(str(pChrom),pChromatinFolder)
     plotFn(pChromFactorArray=pFactorArray,

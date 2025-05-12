@@ -14,10 +14,10 @@ log = logging.getLogger(__name__)
 
 
 class DataContainer():
-    def __init__(self, chromosome, matrixFilePath, chromatinFolder, binSize=None):
+    def __init__(self, chromosome, matrixFilePath, chromatinData, binSize=None):
         self.chromosome = str(chromosome)
         self.matrixFilePath = matrixFilePath
-        self.chromatinFolder = chromatinFolder
+        self.chromatinData = chromatinData
         self.FactorDataArray = None
         self.nr_factors = None
         self.sparseHiCMatrix = None
@@ -40,7 +40,7 @@ class DataContainer():
 
     def __loadFactorData(self, ignoreChromLengths=False, scaleFeatures=False, clampFeatures=False):
         #load chromatin factor data from bigwig files
-        if self.chromatinFolder is None:
+        if self.chromatinData is None:
             return
         #ensure that binSizes for matrix (if given) and factors match
         if self.binSize is None:
@@ -48,18 +48,25 @@ class DataContainer():
             raise TypeError(msg)
         ###load data for a specific chromsome
         #get the names of the bigwigfiles
-        chromatinIsFolder = os.path.isdir(self.chromatinFolder)
-        if not os.path.isdir(self.chromatinFolder) or not os.listdir(self.chromatinFolder):
-            raise OSError(f"Chromatin folder '{self.chromatinFolder}' does not exist or is empty.")
+        chromatinIsList = False
+        if isinstance(self.chromatinData, list) :
+            chromatinIsList = True
         
-        if chromatinIsFolder:
-            bigwigFileList = utils.getBigwigFileList(self.chromatinFolder)
+        
+        # if not os.path.isdir(self.chromatinData[0]) or not os.listdir(self.chromatinData[0]):
+        #     raise OSError(f"Chromatin folder '{self.chromatinData}' does not exist or is empty.")
+        
+        if not chromatinIsList:
+            bigwigFileList = utils.getBigwigFileList(self.chromatinData)
             bigwigFileList = sorted(bigwigFileList)
         else:
-            bigwigFileList = sorted(self.chromatinFolder)
+            bigwigFileList = sorted(self.chromatinData)
         if len(bigwigFileList) is None:
             msg = "Warning: folder {:s} does not contain any bigwig files"
-            msg = msg.format(self.chromatinFolder)
+            if chromatinIsList:
+                msg = msg.format(self.chromatinData[0])
+            else:
+                msg = msg.format(self.chromatinData)
             print(msg)
             return
         #check the chromosome name prefixes (e.g. "" or "chr") and sizes
@@ -98,7 +105,10 @@ class DataContainer():
         nr_bins = int( np.ceil(self.chromSize_factors / self.binSize) )
         self.FactorDataArray = np.empty(shape=(len(bigwigFileList),nr_bins))
         msg = "Loaded {:d} chromatin features from folder {:s}\n"
-        msg = msg.format(self.nr_factors, self.chromatinFolder)
+        if chromatinIsList:
+            msg = msg.format(self.nr_factors, self.chromatinData[0])  
+        else:
+            msg = msg.format(self.nr_factors, self.chromatinData)
         featLoadedMsgList = [] #pretty printing for features loaded
 
         def process_bigwig_file(bigwigFile):
@@ -215,12 +225,16 @@ class DataContainer():
         flankingSizeOK = self.flankingSize == container.flankingSize
         maximumDistanceOK = self.maximumDistance == container.maximumDistance
         log.debug("Factors: {:s} -- Matrix: {:s} -- windowSize: {:s} -- flankingSize: {:s} -- maximumDistance: {:s}".format(str(factorsOK), str(matrixOK), str(windowSizeOK), str(flankingSizeOK), str(maximumDistanceOK)))
-        log.debug("Chromatin folder: {:s} -- Nr. factors: {:s}".format(str(self.chromatinFolder), str(self.nr_factors)))
-        log.debug("Chromatin folder: {:s} -- Nr. factors: {:s}".format(str(container.chromatinFolder), str(container.nr_factors)))
+        if isinstance(self.chromatinData, list):
+            log.debug("Chromatin folder: {:s} -- Nr. factors: {:s}".format(str(self.chromatinData[0]), str(self.nr_factors)))
+        else:
+            log.debug("Chromatin folder: {:s} -- Nr. factors: {:s}".format(str(self.chromatinData), str(self.nr_factors)))
+
+        log.debug("Chromatin folder: {:s} -- Nr. factors: {:s}".format(str(container.chromatinData), str(container.nr_factors)))
         #sanity check loading of bigwig files
-        if self.chromatinFolder is not None and self.nr_factors is None:
+        if self.chromatinData is not None and self.nr_factors is None:
             return False
-        if container.chromatinFolder is not None and container.nr_factors is None:
+        if container.chromatinData is not None and container.nr_factors is None:
             return False
         #if chromatin factors are present, the numbers and names of chromatin factors must match
         factorsOK = factorsOK and (self.nr_factors == container.nr_factors)
@@ -260,7 +274,10 @@ class DataContainer():
         samples_per_file = [target_ct]*(nr_files-1) + [nr_samples-(nr_files-1)*target_ct]
         sample_indices = [sum(samples_per_file[0:i]) for i in range(len(samples_per_file)+1)] 
         #write the single files
-        folderName = self.chromatinFolder.strip("/").replace("/","_")
+        if isinstance(self.chromatinData, str):
+            folderName = self.chromatinData.strip("/").replace("/","_")
+        else:
+            folderName = self.chromatinData[0].strip("/").replace("/","_")
         recordfiles = [os.path.join(pOutputFolder, "{:s}_{:s}_{:03d}.tfrecord".format(folderName, str(self.chromosome), i + 1)) for i in range(nr_files)]
 
         def storeTFRecord(recordfile, firstIndex, lastIndex, outfolder):
@@ -322,7 +339,7 @@ class DataContainer():
         return trainmatrix
     
     def __getFactorData(self, idx):
-        if self.chromatinFolder is None:
+        if self.chromatinData is None:
             return None
         if not self.data_loaded:
             msg = "Error: Load data first"
@@ -366,7 +383,7 @@ class DataContainer():
         for plotType in ["box", "line"]:   
             utils.plotChromatinFactors(pFactorArray=factorArray, 
                                         pFeatureNameList=self.factorNames,
-                                        pChromatinFolder=self.chromatinFolder,
+                                        pChromatinFolder=self.chromatinData,
                                         pChrom=self.chromosome,
                                         pbinSize=self.binSize,
                                         pStartbin=startBin,
@@ -413,7 +430,7 @@ class DataContainer():
             sparseMatrix = csr_matrix(tmpMat)
         else:
             sparseMatrix = self.sparseHiCMatrix
-        folderName = self.chromatinFolder.rstrip("/").replace("/","-")
+        folderName = self.chromatinData.rstrip("/").replace("/","-")
         filename = "matrix_{:s}_chr{:s}_{:s}".format(folderName, str(self.chromosome), str(index))
         filename = os.path.join(outputpath, filename)
         save_npz(file=filename, matrix=sparseMatrix)

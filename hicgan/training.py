@@ -35,7 +35,7 @@ def parse_arguments(args=None):
     parser.add_argument("--validationChromosomes", "-vchroms", required=True,
                         type=str, nargs='+',
                         help="Validation chromosomes. Must be present in all validation matrices.")
-    parser.add_argument("--validationChromosomesFolders", "-vcp", required=True,
+    parser.add_argument("--validationChromatinFolders", "-vcp", required=True,
                         type=str, nargs='+',
                         help="Path where chromatin factors for validation reside (bigwig files).")
     parser.add_argument("--windowSize", "-ws", required=True,
@@ -112,7 +112,7 @@ def parse_arguments(args=None):
 def create_container(chrom, matrix, chromatinpath):
         container = dataContainer.DataContainer(chromosome=chrom,
                                                 matrixFilePath=matrix,
-                                                chromatinFolder=chromatinpath)
+                                                chromatinData=chromatinpath)
         return container
 
 def create_data(pTrainingMatrices, 
@@ -377,9 +377,9 @@ def main(args=None):
         log.info("Using single GPU training")
         log.info("Available GPUs: {}".format(gpu))
         log.info("Using GPU: {}".format(args.whichGPU-1))
-        log.info("Using GPU: {}".format(gpu[args.whichGPU].name))
+        # log.info("Using GPU: {}".format(gpu[args.whichGPU].name))
         if args.whichGPU:
-            if args.whichGPU >= len(gpu):
+            if args.whichGPU > len(gpu):
                 raise ValueError("Invalid GPU index: {}".format(args.whichGPU - 1))
             # strategy = tf.distribute.OneDeviceStrategy(device=gpu[args.whichGPU].name)
             strategy = tf.distribute.OneDeviceStrategy(device=f"/GPU:{args.whichGPU-1}")
@@ -391,7 +391,7 @@ def main(args=None):
                     args.trainingChromatinFolders, 
                     args.validationMatrices, 
                     args.validationChromosomes, 
-                    args.validationChromosomesFolders,
+                    args.validationChromatinFolders,
                     args.windowSize,
                     args.outputFolder,
                     args.batchSize,
