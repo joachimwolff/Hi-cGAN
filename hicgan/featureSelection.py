@@ -273,7 +273,7 @@ def runTrainingPredictionAndValidation(pArgs, strategy):
         print("SCC score: ", score)
         # Save the score to a file
         with open(os.path.join(pArgs.outputFolder, trial_id, "scc_score.txt"), "w") as f:
-            f.write(f"SCC score: {score}\n")
+            f.write(f"SCC score: {score:.4f}\n")
         # Save the score to a JSON file
     except Exception as e:
         traceback.print_exc()
@@ -404,6 +404,12 @@ def main(args=None):
             range(len(combined_files_all_training)),
             min(args.numberOfRandomSamples, len(combined_files_all_training))
         )
+
+        print("Randomly selected indices for training, validation, and prediction files: {}".format(random_indices))
+        for i in random_indices:
+            print("Training files: {}".format(len(combined_files_all_training[i])))
+            print("Validation files: {}".format(len(combined_files_all_validation[i])))
+            print("Prediction files: {}".format(len(combined_files_all_prediction[i])))
         combined_files_all_training = [combined_files_all_training[i] for i in random_indices]
         combined_files_all_validation = [combined_files_all_validation[i] for i in random_indices]
         combined_files_all_prediction = [combined_files_all_prediction[i] for i in random_indices]
