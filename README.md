@@ -1,3 +1,6 @@
+# Hyperparameter optimization scoring functions
+The source code for the hyperparameter scoring function publication is provided in a separate repository for better differentiation from Hi-cGAN: https://github.com/joachimwolff/hyperparameterScoringHiC
+
 # Hi-cGAN
 
 Hi-cGAN is a conditional generative adversarial network 
