@@ -1,6 +1,7 @@
 import os
 import logging
 import argparse
+from functools import partial
 
 import h5py
 import tensorflow as tf
@@ -13,6 +14,12 @@ import itertools
 import random
 import string
 import traceback
+
+import ray
+from ray import tune
+from ray.air import session
+
+import pygenometracks.plotTracks
 
 from hicgan.training import training, create_data, delete_model_files
 from hicgan.predict import prediction
@@ -148,10 +155,10 @@ def parse_arguments(args=None):
                         default="png",
                         help="Figure type for all plots.")
     parser.add_argument("--plotFrequency", "-pf", required=False,
-                        type=int, default=1,
+                        type=int, default=50,
                         help="Frequency of plotting during training.")
     parser.add_argument("--matrixOutputName", "-mon", required=False,
-                        type=str, default="predicted_matrix.mcool",
+                        type=str, default="predicted_matrix.cool",
                         help="Name of the output matrix file.")
     parser.add_argument("--parameterOutputFile", "-pof", required=False,
                         type=str, default="parameters.json",
@@ -165,188 +172,227 @@ def parse_arguments(args=None):
     parser.add_argument("--numberOfRandomSamples", "-nsr", required=False,
                         type=int, default=0,
                         help="Number of random samples to use.")
+
+    parser.add_argument("--seed", type=int, default=42, help="Seed for reproducibility")
+
     parser.add_argument('--version', action='version',
                            version='%(prog)s {}'.format(__version__))
     return parser.parse_args()
 
-def runTrainingPredictionAndValidation(pArgs, strategy):
-    
-    trial_id = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
+experiment_results = []
 
-    print("GPU: {}; Training and prediction with combination {}: {}".format(pArgs.whichGPU, trial_id, len(pArgs.trainingChromatinFolder)))
-    filenames = [os.path.basename(path) for path in pArgs.trainingChromatinFolder]
-    # print("Training Chromatin Folder:", pArgs.trainingChromatinFolder)
-    print("GPU: {}; Filenames from trainingChromatinFolder: {}".format(pArgs.whichGPU, filenames))
-    # Use cooler to get the bin size from the training matrices
-    if not pArgs.trainingMatrices or len(pArgs.trainingMatrices) == 0:
-        raise ValueError("No training matrices provided.")
-    clr = cooler.Cooler(pArgs.trainingMatrices[0])
-    binSize = clr.binsize
-
-    tfRecordFilenames, traindataContainerListLength, nr_samples_list, storedFeatures, nr_factors = create_data(
-            pTrainingMatrices=pArgs.trainingMatrices, 
-            pTrainingChromosomes=pArgs.trainingChromosomes, 
-            pTrainingChromatinFolders=pArgs.trainingChromatinFolder, 
-            pValidationMatrices=pArgs.validationMatrices, 
-            pValidationChromosomes=pArgs.validationChromosomes, 
-            pValidationChromatinFolders=pArgs.validationChromatinFolder,
-            pWindowSize=pArgs.windowSize,
-            pOutputFolder=os.path.join(pArgs.outputFolder,trial_id),
-            pBatchSize=pArgs.batchSize,
-            pFlipSamples=False,
-            pFigureFileFormat="png",
-            pRecordSize=pArgs.recordSize
-        )
-
-    log.debug("Start training")
-    with strategy.scope() as scope:
-        training(
-            pTfRecordFilenames=tfRecordFilenames,
-            pLengthTrainDataContainerList=traindataContainerListLength,
-            pWindowSize=pArgs.windowSize,
-            pOutputFolder=os.path.join(pArgs.outputFolder, trial_id),
-            pEpochs=pArgs.epochs,
-            pBatchSize=pArgs.batchSize,
-            pLossWeightPixel=pArgs.lossWeightPixel,
-            pLossWeightDiscriminator=pArgs.lossWeightDiscriminator,
-            pLossWeightAdversarial=pArgs.lossWeightAdversarial,
-            pLossTypePixel=pArgs.lossTypePixel,
-            pLossWeightTV=pArgs.lossWeightTV,
-            pLearningRateGenerator=pArgs.learningRateGenerator,
-            pLearningRateDiscriminator=pArgs.learningRateDiscriminator,
-            pBeta1=pArgs.beta1,
-            pFigureFileFormat=pArgs.figureFileFormat,
-            pPlotFrequency=pArgs.plotFrequency,
-            pScope=scope,
-            pStoredFeaturesDict=storedFeatures,
-            pNumberSamplesList=nr_samples_list,
-            pNumberOfFactors=nr_factors,
-            pFlipSamples=pArgs.flipSamples,
-            pRecordSize=pArgs.recordSize
-        )
-
-    log.debug("Start prediction")
-    if not os.path.exists(os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName)):
-        with h5py.File(os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), "w") as f:
-            # Optionally, initialize any groups or datasets if necessary.
-            # For example: f.create_group("bins")
-            pass  # For now, we're just creating an empty file.
-    prediction(
-        pTrainedModel=os.path.join(
-            pArgs.outputFolder, trial_id, pArgs.generatorName),
-        pPredictionChromatinFolders=pArgs.predictionChromatinFolder,
-        pPredictionChromosomes=pArgs.predictionChromosomes,
-        pOutputFolder=os.path.join(pArgs.outputFolder, trial_id),
-        pMultiplier=pArgs.multiplier,
-        pBinSize=binSize,
-        pBatchSize=pArgs.batchSize,
-        pWindowSize=pArgs.windowSize,
-        pMatrixOutputName=pArgs.matrixOutputName,
-        pParameterOutputFile=pArgs.parameterOutputFile
-    )
-
+def runTrainingPredictionAndValidation(config, pArgs):
     try:
-        log.debug("Compute hicrep")
-        # activate_lock_or_wait(lock_file_hicrep_path, method="hicrep")
+        assigned_gpus = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        print(f"Ray assigned GPU devices: {assigned_gpus}")
+
+        # From TF's perspective, only the GPUs listed in CUDA_VISIBLE_DEVICES exist.
+        physical_gpus = tf.config.list_physical_devices('GPU')
+        # print(f"Physical GPUs: {physical_gpus}")
+        # exit()
+        if physical_gpus:
+            # Enable dynamic memory growth for each visible GPU
+            for gpu in physical_gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            
+            # If exactly one GPU is visible, create a OneDeviceStrategy
+            if len(physical_gpus) == 1:
+                # device_name = physical_gpus[0].name  # e.g. '/physical_device:GPU:0'
+                # print(f"Using OneDeviceStrategy on {device_name}")
+                device_index = physical_gpus[0].name.split(":")[-1]  # e.g. '0'
+                valid_tf_device = f"/device:GPU:{device_index}"
+
+                print(f"Converting {physical_gpus[0].name} -> {valid_tf_device}")
+
+                strategy = tf.distribute.OneDeviceStrategy(device=valid_tf_device)
+            else:
+                strategy = tf.distribute.MirroredStrategy()
+
+
+        trial_id = session.get_trial_id()
+
+        trainingFiles = config['input_file'][0]
+        validationFiles = config['input_file'][1]
+        predictionFiles = config['input_file'][2]
+        print("Training and prediction with combination {}: {}".format(trial_id, len(trainingFiles)))
+        filenames = [os.path.basename(path) for path in trainingFiles]
+        # print("Training Chromatin Folder:", pArgs.trainingChromatinFolder)
+        print("Filenames from trainingChromatinFolder: {}".format(filenames))
+        # Use cooler to get the bin size from the training matrices
+        if not pArgs.trainingMatrices or len(pArgs.trainingMatrices) == 0:
+            raise ValueError("No training matrices provided.")
+        clr = cooler.Cooler(pArgs.trainingMatrices[0])
+        binSize = clr.binsize
+
+        tfRecordFilenames, traindataContainerListLength, nr_samples_list, storedFeatures, nr_factors = create_data(
+                pTrainingMatrices=pArgs.trainingMatrices, 
+                pTrainingChromosomes=pArgs.trainingChromosomes, 
+                pTrainingChromatinFolders=trainingFiles, 
+                pValidationMatrices=pArgs.validationMatrices, 
+                pValidationChromosomes=pArgs.validationChromosomes, 
+                pValidationChromatinFolders=validationFiles,
+                pWindowSize=pArgs.windowSize,
+                pOutputFolder=os.path.join(pArgs.outputFolder,trial_id),
+                pBatchSize=pArgs.batchSize,
+                pFlipSamples=False,
+                pFigureFileFormat="png",
+                pRecordSize=pArgs.recordSize
+            )
+
+        log.debug("Start training")
+        with strategy.scope() as scope:
+            training(
+                pTfRecordFilenames=tfRecordFilenames,
+                pLengthTrainDataContainerList=traindataContainerListLength,
+                pWindowSize=pArgs.windowSize,
+                pOutputFolder=os.path.join(pArgs.outputFolder, trial_id),
+                pEpochs=pArgs.epochs,
+                pBatchSize=pArgs.batchSize,
+                pLossWeightPixel=pArgs.lossWeightPixel,
+                pLossWeightDiscriminator=pArgs.lossWeightDiscriminator,
+                pLossWeightAdversarial=pArgs.lossWeightAdversarial,
+                pLossTypePixel=pArgs.lossTypePixel,
+                pLossWeightTV=pArgs.lossWeightTV,
+                pLearningRateGenerator=pArgs.learningRateGenerator,
+                pLearningRateDiscriminator=pArgs.learningRateDiscriminator,
+                pBeta1=pArgs.beta1,
+                pFigureFileFormat=pArgs.figureFileFormat,
+                pPlotFrequency=pArgs.plotFrequency,
+                pScope=scope,
+                pStoredFeaturesDict=storedFeatures,
+                pNumberSamplesList=nr_samples_list,
+                pNumberOfFactors=nr_factors,
+                pFlipSamples=pArgs.flipSamples,
+                pRecordSize=pArgs.recordSize
+            )
+
+        log.debug("Start prediction")
+        if not os.path.exists(os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName)):
+            with h5py.File(os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), "w") as f:
+                # Optionally, initialize any groups or datasets if necessary.
+                # For example: f.create_group("bins")
+                pass  # For now, we're just creating an empty file.
+        prediction(
+            pTrainedModel=os.path.join(
+                pArgs.outputFolder, trial_id, pArgs.generatorName),
+            pPredictionChromatinFolders=predictionFiles,
+            pPredictionChromosomes=pArgs.predictionChromosomes,
+            pOutputFolder=os.path.join(pArgs.outputFolder, trial_id),
+            pMultiplier=pArgs.multiplier,
+            pBinSize=binSize,
+            pBatchSize=pArgs.batchSize,
+            pWindowSize=pArgs.windowSize,
+            pMatrixOutputName=pArgs.matrixOutputName,
+            pParameterOutputFile=pArgs.parameterOutputFile
+        )
+
+        try:
+            log.debug("Compute hicrep")
+            # activate_lock_or_wait(lock_file_hicrep_path, method="hicrep")
+            
+            cool1, binSize1 = readMcool(os.path.join(
+            pArgs.outputFolder, trial_id, pArgs.matrixOutputName), -1)
+            cool2, binSize2 = readMcool(pArgs.originalDataMatrix, -1)
+
+            # smoothing window half-size
+            h = 5
+
+            # maximal genomic distance to include in the calculation
+            dBPMax = 1000000
+
+            # whether to perform down-sampling or not
+            # if set True, it will bootstrap the data set # with larger contact counts to
+            # the same number of contacts as in the other data set; otherwise, the contact
+            # matrices will be normalized by the respective total number of contacts
+            bDownSample = False
+
+            # Optionally you can get SCC score from a subset of chromosomes
+            sccSub = hicrepSCC(cool1, cool2, h, dBPMax,
+                            bDownSample, pArgs.testChromosomes)
+            # removeLock(lock_file_hicrep_path)
+            score =  np.mean(sccSub)
+            log.debug("SCC score: {:.4f}".format(score))
+            # Save the score to a file
+            with open(os.path.join(pArgs.outputFolder, trial_id, "scc_score.txt"), "w") as f:
+                f.write(f"SCC score: {score:.4f}\n")
+            # Save the score to a JSON file
+        except Exception as e:
+            traceback.print_exc()
+            print(e)
+            score = -1
         
-        cool1, binSize1 = readMcool(os.path.join(
-        pArgs.outputFolder, trial_id, pArgs.matrixOutputName), -1)
-        cool2, binSize2 = readMcool(pArgs.originalDataMatrix, -1)
+        matrixOutputNameWithoutExt = os.path.splitext(pArgs.matrixOutputName)[0]
+        if pArgs.genomicRegion:
+            log.debug("Plot tracks")
+                
+            score_text = str(score)
+            os.makedirs(os.path.join(pArgs.outputFolder, "scores_txt"), exist_ok=True)
+            score_file_path = os.path.join(pArgs.outputFolder, "scores_txt", trial_id + '_' + matrixOutputNameWithoutExt + "_score_summary.txt")
 
-        # smoothing window half-size
-        h = 5
+            with open(score_file_path, 'w') as score_file:
+                score_file.write(score_text)
+            
+            score_text = score_text.replace("\n", "; ")
+            browser_tracks_with_hic = """
+[hic matrix]
+file = {0}
+title = {2}
+depth = {4}
+transform = log1p
+file_type = hic_matrix
+show_masked_bins = false
 
-        # maximal genomic distance to include in the calculation
-        dBPMax = 1000000
+[spacer]
+height = 1
 
-        # whether to perform down-sampling or not
-        # if set True, it will bootstrap the data set # with larger contact counts to
-        # the same number of contacts as in the other data set; otherwise, the contact
-        # matrices will be normalized by the respective total number of contacts
-        bDownSample = False
+[hic matrix]
+file = {1}
+title = original matrix {3}
+depth = {4}
+transform = log1p
+file_type = hic_matrix
+show_masked_bins = false
+orientation = inverted
+            """.format(os.path.join(pArgs.outputFolder, trial_id, pArgs.matrixOutputName), pArgs.originalDataMatrix, score_text, pArgs.trainingCellType, 2000000)
+                
 
-        # Optionally you can get SCC score from a subset of chromosomes
-        sccSub = hicrepSCC(cool1, cool2, h, dBPMax,
-                        bDownSample, pArgs.testChromosomes)
-        # removeLock(lock_file_hicrep_path)
-        score =  np.mean(sccSub)
-        print("SCC score: ", score)
-        # Save the score to a file
-        with open(os.path.join(pArgs.outputFolder, trial_id, "scc_score.txt"), "w") as f:
-            f.write(f"SCC score: {score:.4f}\n")
-        # Save the score to a JSON file
-    except Exception as e:
-        traceback.print_exc()
-        print(e)
-        score = -1
+            tracks_path = os.path.join(
+                pArgs.outputFolder, "browser_tracks_hic.ini")
+            with open(tracks_path, 'w') as fh:
+                fh.write(browser_tracks_with_hic)
 
-    log.debug("Compute feature importance using Explainable AI")
-    # try:
+            outfile = os.path.join(
+                pArgs.outputFolder, "pygenometracks", trial_id + '_' + matrixOutputNameWithoutExt + ".pdf")
 
-    #     log.info("Compute feature importance using Gradient x Input")
+            arguments = f"--tracks {tracks_path} --region {pArgs.genomicRegion} "\
+                        f"--outFileName {outfile} --trackLabelFraction 0.1 --width 25 --height 15".split()
+            try:
+                pygenometracks.plotTracks.main(arguments)
+            except Exception as e:
+                traceback.print_exc()
+                print(e)
+        delete_model_files(pTFRecordFiles=tfRecordFilenames)
 
-    #     # Load the trained generator model
-    #     model_path = os.path.join(pArgs.outputFolder, trial_id, pArgs.generatorName)
-    #     model = load_model(model_path)
-
-    #     # Prepare input feature matrix
-    #     traindataRecords = [item for sublist in tfRecordFilenames[0:traindataContainerListLength] for item in sublist]
-    #     trainDs = tf.data.TFRecordDataset(
-    #         traindataRecords,
-    #         num_parallel_reads=tf.data.experimental.AUTOTUNE,
-    #         compression_type="GZIP"
-    #     )
-    #     sample_data = trainDs.map(
-    #         lambda x: records.parse_function(x, storedFeatures),
-    #         num_parallel_calls=tf.data.experimental.AUTOTUNE
-    #     ).take(100)
-
-    #     # Convert dataset to NumPy array
-    #     # sample_data_np = np.array([x.numpy() for x in sample_data], dtype=np.float32)
-    #     sample_data_np = np.array([
-    #                                 np.stack([v.numpy().squeeze() for v in x[0].values()], axis=-1)  # shape (768, 12, num_features)
-    #                                 for x in sample_data
-    #                             ], dtype=np.float32)
-    #     # Convert to tensor
-    #     X_tensor = tf.convert_to_tensor(sample_data_np, dtype=tf.float32)
-    #     with tf.GradientTape() as tape:
-    #         tape.watch(X_tensor)
-    #         preds = model(X_tensor)
-
-    #     grads = tape.gradient(preds, X_tensor)
-    #     grad_times_input = grads * X_tensor
-    #     feature_importance = tf.reduce_mean(tf.abs(grad_times_input), axis=0).numpy()
-
-    #     # Save feature importance as .npy
-    #     importance_path = os.path.join(pArgs.outputFolder, trial_id, "feature_importance.npy")
-    #     np.save(importance_path, feature_importance)
-
-    #     # Optionally, visualize
-    #     import matplotlib.pyplot as plt
-
-    #     feature_names = list(storedFeatures.keys())
-    #     feature_importance_1d = feature_importance.mean(axis=(0, 1))  # shape: (num_features,)
-
-    #     # Plot
-    #     plt.figure(figsize=(10, 5))
-    #     plt.bar(range(len(feature_names)), feature_importance_1d)
-    #     plt.xticks(range(len(feature_names)), feature_names, rotation=90)
-    #     plt.tight_layout()
-    #     plot_path = os.path.join(pArgs.outputFolder, trial_id, "feature_importance_plot.png")
-    #     plt.savefig(plot_path)
-    #     plt.close()
-
-    #     log.info(f"Feature importance computed and saved to {importance_path} and {plot_path}")
-
-    # except Exception as e:
-    #     traceback.print_exc()
-    #     print(f"Error computing feature importance: {e}")
-
-    return score, trial_id
+    except tf.errors.OpError as e:
+        log.error("TensorFlow OpError caught")
+        # tf.errors.OpError is a common superclass for many TF errors
+        traceback_str = traceback.format_exc()
+        # Re-raise as a generic Python exception with the original traceback
+        raise RuntimeError(
+            f"TensorFlow OpError caught. Original traceback:\n{traceback_str}"
+        ) from e
+    experiment_results.append({
+        "input_file": config["input_file"],
+        "score": score,
+        "trial_id": trial_id
+    })
+    return score
      
 
 def main(args=None):
     args = parse_arguments()
+    os.makedirs(args.outputFolder, exist_ok=True)
+    os.makedirs(os.path.join(args.outputFolder, "pygenometracks"), exist_ok=True)
     # print(args)
     # Read in the folder content of args.trainingChromatinFolder
     training_files = []
@@ -400,6 +446,8 @@ def main(args=None):
         combined_files_all_prediction += list(itertools.combinations(prediction_files, r))
 
     if args.numberOfRandomSamples is not None and args.numberOfRandomSamples > 0:
+
+        random.seed(args.seed)
         random_indices = random.sample(
             range(len(combined_files_all_training)),
             min(args.numberOfRandomSamples, len(combined_files_all_training))
@@ -418,72 +466,36 @@ def main(args=None):
         combined_files_validation.extend(combined_files_all_validation)
         combined_files_prediction.extend(combined_files_all_prediction)
     
-        
-
+    
+    if not any(len(element) == len(training_files) for element in combined_files_training):
+        combined_files_training.extend(training_files)
+        combined_files_validation.extend(validation_files)
+        combined_files_prediction.extend(prediction_files)
+    
     print("Number of file combinations: {}".format(len(combined_files_training)))
-    # print("Training files found:", training_files)
-   
-    # log.info("Using single GPU training")
-    # log.info("Available GPUs: {}".format(gpu))
-    # log.info("Using GPU: {}".format(args.whichGPU-1))
-    # log.info("Using GPU: {}".format(gpu[args.whichGPU].name))
-    # if args.whichGPU:
-    #     if args.whichGPU >= len(gpu):
-    #         raise ValueError("Invalid GPU index: {}".format(args.whichGPU - 1))
-    #     # strategy = tf.distribute.OneDeviceStrategy(device=gpu[args.whichGPU].name)
-    #     strategy = tf.distribute.OneDeviceStrategy(device=f"/GPU:{args.whichGPU-1}")
-    
-    gpu = tf.config.list_physical_devices('GPU')
-    if gpu:
-        try:
-            for gpu_device in gpu:
-                tf.config.experimental.set_memory_growth(gpu_device, True)
-        except Exception as e:
-            print("Error: {}".format(e))
 
-    results = {}
-    active_threads = []
-    gpu_status = [False] * len(gpu)  # False means GPU is free
+    file_triplets = list(zip(combined_files_training, combined_files_validation, combined_files_prediction))
+    metric = 'accuracy'
+    mode = 'max'
+    run_with_fixed_params = partial(runTrainingPredictionAndValidation, pArgs=args)
 
-    for i, (training_files, validation_files, prediction_files) in enumerate(zip(combined_files_training, combined_files_validation, combined_files_prediction)):
+    search_space = {
+    'input_file': tune.grid_search(file_triplets)  # Use grid search to select input files
+    }
+    objective_with_resources = tune.with_resources(run_with_fixed_params, resources={"cpu": args.threads, "gpu": args.gpu})
 
-        args.trainingChromatinFolder = training_files
-        args.validationChromatinFolder = validation_files
-        args.predictionChromatinFolder = prediction_files
+        # Initialize Ray
+    ray.init(ignore_reinit_error=True)
 
-        while True:
-            # Check for a free GPU
-            free_gpu_index = next((index for index, status in enumerate(gpu_status) if not status), None)
-            if free_gpu_index is not None:
-                args.whichGPU = free_gpu_index
-                gpu_status[free_gpu_index] = True  # Mark GPU as busy
+    #    Run the experiment
+    analysis = tune.run(
+        objective_with_resources,  # Run the function with fixed parameters and allocated resources
+        config=search_space,
+    )
 
-                def run_and_store_score(files, gpu_index):
-                    strategy = tf.distribute.OneDeviceStrategy(device=f"/GPU:{gpu_index}")
-                    score, trial_id = runTrainingPredictionAndValidation(args, strategy)
-                    # score = gpu_index  # Placeholder for actual score
-                    results[tuple(files)] = (score, trial_id)
-                    gpu_status[gpu_index] = False  # Mark GPU as free after completion
+    with open(os.path.join(args.outputFolder, "results.txt"), "w") as result_file:
+        for result in experiment_results:
+            result_file.write(f"Input File: {result['input_file']} | Score: {result['score']} | Trailid: {result['trail_id']}\n")
 
-                # print("Training and prediction with combination {}: {}".format(i+1, training_files))
-                print(f"\n\nTraining and prediction with combination {i+1}/{len(combined_files_training)} on GPU {free_gpu_index}, files {len(training_files)}: {training_files}\n\n")
-
-                thread = threading.Thread(target=run_and_store_score, args=(training_files, free_gpu_index))
-                thread.start()
-                active_threads.append(thread)
-                break  # Exit the loop to process the next combination
-            else:
-                # Wait for any thread to finish if no GPU is free
-                for t in active_threads:
-                    t.join(timeout=1)
-                active_threads = [t for t in active_threads if t.is_alive()]
-
-    # Ensure all threads are completed before exiting
-    for t in active_threads:
-        t.join()
-    
-    if not os.path.exists(args.outputFolder):
-        os.makedirs(args.outputFolder)
-    with open(os.path.join(args.outputFolder, "results.txt"), "w") as outfile:
-        for combo, score_val in results.items():
-            outfile.write(f"{combo}: {score_val}\n")
+    # Shutdown Ray when finished
+    ray.shutdown()
