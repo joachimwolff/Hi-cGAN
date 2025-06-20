@@ -26,7 +26,7 @@ def parse_arguments(args=None):
     parser.add_argument("--trainingChromosomes", "-tchroms", required=True,
                         type=str, nargs='+',
                         help="Train chromosomes. Must be present in all train matrices.")
-    parser.add_argument("--trainingChromosomesFolders", "-tcp", required=True,
+    parser.add_argument("--trainingChromatinFolders", "-tcp", required=True,
                         type=str, nargs='+',
                         help="Path where chromatin factors for training reside (bigwig files).")
     parser.add_argument("--validationMatrices", "-vm", required=True,
@@ -35,7 +35,7 @@ def parse_arguments(args=None):
     parser.add_argument("--validationChromosomes", "-vchroms", required=True,
                         type=str, nargs='+',
                         help="Validation chromosomes. Must be present in all validation matrices.")
-    parser.add_argument("--validationChromosomesFolders", "-vcp", required=True,
+    parser.add_argument("--validationChromatinFolders", "-vcp", required=True,
                         type=str, nargs='+',
                         help="Path where chromatin factors for validation reside (bigwig files).")
     parser.add_argument("--windowSize", "-ws", required=True,
@@ -85,6 +85,9 @@ def parse_arguments(args=None):
     parser.add_argument("--flipSamples", "-fs", required=False,
                         action='store_true',
                         help="Flip training matrices and chromatin features (data augmentation).")
+    parser.add_argument("--noScaleNorm", "-nsn", required=False,
+                        action='store_false',
+                        help="Do not scale normalization of chromatin features to 0-1 range.")
     parser.add_argument("--figureFileFormat", "-ft", required=False,
                         type=str, choices=["png", "pdf", "svg"],
                         default="png",
@@ -117,16 +120,17 @@ def create_container(chrom, matrix, chromatinpath):
 
 def create_data(pTrainingMatrices, 
                 pTrainingChromosomes, 
-                pTrainingChromosomesFolders, 
+                ptrainingChromatinFolders, 
                 pValidationMatrices, 
                 pValidationChromosomes, 
-                pValidationChromosomesFolders,
+                pvalidationChromatinFolders,
                 pWindowSize,
                 pOutputFolder,
                 pBatchSize,
                 pFlipSamples,
                 pFigureFileFormat,
-                pRecordSize):
+                pRecordSize,
+                noScaleNorm=False):
     os.makedirs(pOutputFolder, exist_ok=True)
     #few constants
     # windowSize = int(windowSize)
@@ -148,15 +152,15 @@ def create_data(pTrainingMatrices,
     paramDict["valChromNameList"] = valChromNameList
 
     #ensure there are as many matrices as chromatin paths
-    if len(pTrainingMatrices) != len(pTrainingChromosomesFolders):
+    if len(pTrainingMatrices) != len(ptrainingChromatinFolders):
         msg = "Number of train matrices and chromatin paths must match\n"
         msg += "Current numbers: Matrices: {:d}; Chromatin Paths: {:d}"
-        msg = msg.format(len(pTrainingMatrices), len(pTrainingChromosomesFolders))
+        msg = msg.format(len(pTrainingMatrices), len(ptrainingChromatinFolders))
         raise SystemExit(msg)
-    if len(pValidationMatrices) != len(pValidationChromosomesFolders):
+    if len(pValidationMatrices) != len(pvalidationChromatinFolders):
         msg = "Number of validation matrices and chromatin paths must match\n"
         msg += "Current numbers: Matrices: {:d}; Chromatin Paths: {:d}"
-        msg = msg.format(len(pValidationMatrices), len(pValidationChromosomesFolders))
+        msg = msg.format(len(pValidationMatrices), len(pvalidationChromatinFolders))
         raise SystemExit(msg)
 
     #prepare the training data containers. No data is loaded yet.
@@ -164,7 +168,7 @@ def create_data(pTrainingMatrices,
 
     with concurrent.futures.ProcessPoolExecutor() as executor:
         for chrom in trainChromNameList:
-            for matrix, chromatinpath in zip(pTrainingMatrices, pTrainingChromosomesFolders):
+            for matrix, chromatinpath in zip(pTrainingMatrices, ptrainingChromatinFolders):
                 future = executor.submit(create_container, chrom, matrix, chromatinpath)
                 traindataContainerList.append(future.result())
 
@@ -173,14 +177,14 @@ def create_data(pTrainingMatrices,
 
     with concurrent.futures.ProcessPoolExecutor() as executor:
         for chrom in valChromNameList:
-            for matrix, chromatinpath in zip(pValidationMatrices, pValidationChromosomesFolders):
+            for matrix, chromatinpath in zip(pValidationMatrices, pvalidationChromatinFolders):
                 future = executor.submit(create_container, chrom, matrix, chromatinpath)
                 valdataContainerList.append(future.result())
 
     #define the load params for the containers
     loadParams = {"scaleFeatures": True,
                 "clampFeatures": False,
-                "scaleTargets": True,
+                "scaleTargets": noScaleNorm,
                 "windowSize": pWindowSize,
                 "flankingSize": pWindowSize,
                 "maximumDistance": None}
@@ -247,7 +251,8 @@ def training(pTfRecordFilenames,
              pRecordSize,
              pStoredFeaturesDict,
              pNumberSamplesList,
-             pNumberOfFactors):
+             pNumberOfFactors
+             ):
 
         traindataRecords = [item for sublist in pTfRecordFilenames[0:pLengthTrainDataContainerList] for item in sublist]
         valdataRecords = [item for sublist in pTfRecordFilenames[pLengthTrainDataContainerList:] for item in sublist]
@@ -355,9 +360,9 @@ def main(args=None):
         log.info("Using single GPU training")
         log.info("Available GPUs: {}".format(gpu))
         log.info("Using GPU: {}".format(args.whichGPU-1))
-        log.info("Using GPU: {}".format(gpu[args.whichGPU].name))
+        # log.info("Using GPU: {}".format(gpu[args.whichGPU-1].name))
         if args.whichGPU:
-            if args.whichGPU >= len(gpu):
+            if args.whichGPU > len(gpu):
                 raise ValueError("Invalid GPU index: {}".format(args.whichGPU - 1))
             # strategy = tf.distribute.OneDeviceStrategy(device=gpu[args.whichGPU].name)
             strategy = tf.distribute.OneDeviceStrategy(device=f"/GPU:{args.whichGPU-1}")
@@ -366,16 +371,17 @@ def main(args=None):
     with strategy.scope() as scope: 
         tfRecordFilenames, traindataContainerListLength, nr_samples_list, storedFeatures, nr_factors = create_data(args.trainingMatrices, 
                     args.trainingChromosomes, 
-                    args.trainingChromosomesFolders, 
+                    args.trainingChromatinFolders, 
                     args.validationMatrices, 
                     args.validationChromosomes, 
-                    args.validationChromosomesFolders,
+                    args.validationChromatinFolders,
                     args.windowSize,
                     args.outputFolder,
                     args.batchSize,
                     args.flipSamples,
                     args.figureFileFormat,
-                    args.recordSize)
+                    args.recordSize,
+                    args.noScaleNorm)
         training(
             pTfRecordFilenames=tfRecordFilenames,
             pLengthTrainDataContainerList=traindataContainerListLength,
