@@ -355,9 +355,9 @@ def main(args=None):
         log.info("Using single GPU training")
         log.info("Available GPUs: {}".format(gpu))
         log.info("Using GPU: {}".format(args.whichGPU-1))
-        log.info("Using GPU: {}".format(gpu[args.whichGPU].name))
+        log.info("Using GPU: {}".format(gpu[args.whichGPU-1].name))
         if args.whichGPU:
-            if args.whichGPU >= len(gpu):
+            if args.whichGPU-1 >= len(gpu):
                 raise ValueError("Invalid GPU index: {}".format(args.whichGPU - 1))
             # strategy = tf.distribute.OneDeviceStrategy(device=gpu[args.whichGPU].name)
             strategy = tf.distribute.OneDeviceStrategy(device=f"/GPU:{args.whichGPU-1}")
