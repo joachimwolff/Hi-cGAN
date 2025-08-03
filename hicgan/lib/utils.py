@@ -233,45 +233,81 @@ def writeCooler(pMatrixList, pBinSizeInt, pOutfile, pChromosomeList, pChromSizeL
     #takes a matrix as numpy array or sparse matrix and writes a cooler matrix from it
     #modified from study project such that multiple chroms can be written to a single matrix
 
+    # def pixelGenerator(pMatrixList, pOffsetList):
+    #     '''
+    #     yields pixel dataframes per Matrix
+    #     Parameters:
+    #     pMatrixList: list of matrices as np.ndarray or sparse.csr_matrix
+    #     pOffsetList: list of integers that specify the offset into the bins dataframe
+
+    #     Yields:
+    #     pixels: pixels dataframe for all Hi-C matrices in the input list
+    #     '''
+    #     for matrix, offset in zip(pMatrixList, pOffsetList):
+    #         log.info(f"Generating pixels for matrix with offset {offset}")
+    #         #create the pixels for cooler
+    #         triu_Indices = np.triu_indices(matrix.shape[0])
+    #         pixels_tmp = pd.DataFrame(columns=['bin1_id','bin2_id','count'])
+    #         pixels_tmp['bin1_id'] = (triu_Indices[0] + offset).astype("uint32")
+    #         pixels_tmp['bin2_id'] = (triu_Indices[1] + offset).astype("uint32")
+    #         readCounts = matrix[triu_Indices]
+    #         if sparse.isspmatrix_csr(matrix): #for sparse matrices, slicing is different
+    #             readCounts = np.transpose(readCounts)
+    #         pixels_tmp['count'] = np.float64(readCounts)
+    #         pixels_tmp.sort_values(by=['bin1_id','bin2_id'],inplace=True)
+    #         yield pixels_tmp
+
     def pixelGenerator(pMatrixList, pOffsetList):
         '''
-        yields pixel dataframes per Matrix
-        Parameters:
-        pMatrixList: list of matrices as np.ndarray or sparse.csr_matrix
-        pOffsetList: list of integers that specify the offset into the bins dataframe
-
-        Yields:
-        pixels: pixels dataframe for all Hi-C matrices in the input list
+        Efficiently yields pixel dataframes per Matrix, only for nonzero entries.
         '''
         for matrix, offset in zip(pMatrixList, pOffsetList):
-            #create the pixels for cooler
-            triu_Indices = np.triu_indices(matrix.shape[0])
-            pixels_tmp = pd.DataFrame(columns=['bin1_id','bin2_id','count'])
-            pixels_tmp['bin1_id'] = (triu_Indices[0] + offset).astype("uint32")
-            pixels_tmp['bin2_id'] = (triu_Indices[1] + offset).astype("uint32")
-            readCounts = matrix[triu_Indices]
-            if sparse.isspmatrix_csr(matrix): #for sparse matrices, slicing is different
-                readCounts = np.transpose(readCounts)
-            pixels_tmp['count'] = np.float64(readCounts)
-            pixels_tmp.sort_values(by=['bin1_id','bin2_id'],inplace=True)
+            log.info(f"Generating pixels for matrix with offset {offset}")
+            if sparse.isspmatrix(matrix):
+                # Use COO format for easy access to nonzero indices
+                coo = matrix.tocoo()
+                mask = coo.row <= coo.col  # upper triangle
+                bin1 = coo.row[mask] + offset
+                bin2 = coo.col[mask] + offset
+                count = coo.data[mask]
+            else:
+                # Dense matrix: get upper triangle indices
+                triu = np.triu_indices(matrix.shape[0])
+                bin1 = triu[0] + offset
+                bin2 = triu[1] + offset
+                count = matrix[triu]
+                mask = count != 0
+                bin1 = bin1[mask]
+                bin2 = bin2[mask]
+                count = count[mask]
+            pixels_tmp = pd.DataFrame({
+                'bin1_id': bin1.astype("uint32"),
+                'bin2_id': bin2.astype("uint32"),
+                'count': np.float64(count)
+            })
+            pixels_tmp.sort_values(by=['bin1_id','bin2_id'], inplace=True)
             yield pixels_tmp
 
     if pMatrixList is None or pChromosomeList is None or pBinSizeInt is None or pOutfile is None:
         msg = "input empty. No cooler matrix written"
+        log.error(msg)
         print(msg)
         return
     if len(pMatrixList) != len(pChromosomeList):
         msg = "number of input arrays and chromosomes must be the same"
+        log.error(msg)
         print(msg)
         return
     if pChromSizeList is not None and len(pChromSizeList) != len(pChromosomeList):
         msg = "if chrom sizes are given, they must be provided for ALL chromosomes"
+        log.error(msg)
         print(msg)
         return
     bins = pd.DataFrame(columns=['chrom','start','end'])
     
     offsetList = [0]
     for i, (matrix, chrom) in enumerate(zip(pMatrixList,pChromosomeList)):
+        log.info(f"Processing chromosome {chrom} ({i+1}/{len(pChromosomeList)})")
         #the chromosome size may not be integer-divisible by the bin size
         #so specifying the real chrom size is possible, but the
         #number of bins must still correspond to the matrix size
@@ -297,6 +333,8 @@ def writeCooler(pMatrixList, pBinSizeInt, pOutfile, pChromosomeList, pChromSizeL
     bins["start"] = bins["start"].astype("uint32")
     bins["end"] = bins["end"].astype("uint32")
     offsetList = offsetList[:-1] #don't need the last one, no more matrix to follow
+
+    log.info(f"Writing cooler file to {pOutfile}")
 
     #write out the cooler
     cooler.create_cooler(pOutfile, bins=bins, pixels=pixelGenerator(pMatrixList=pMatrixList, pOffsetList=offsetList), dtypes={'count': np.float64}, ordered=True, metadata=pMetadata)
