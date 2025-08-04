@@ -203,14 +203,48 @@ def rebuildMatrix(pArrayOfTriangles, pWindowSize, pFlankingSize=None, pMaxDist=N
     #rebuilds the interaction matrix (a trapezoid along its diagonal)
     #by taking the mean of all overlapping triangles
     #returns an interaction matrix as a numpy ndarray
+    # if pFlankingSize == None:
+    #     flankingSize = pWindowSize
+    # else:
+    #     flankingSize = pFlankingSize
+    # nr_matrices = pArrayOfTriangles.shape[0]
+    # sum_matrix = np.zeros( (nr_matrices - 1 + (pWindowSize+2*flankingSize), nr_matrices - 1 + (pWindowSize+2*flankingSize)) )
+    # count_matrix = np.zeros_like(sum_matrix,dtype=int)    
+    # mean_matrix = np.zeros_like(sum_matrix,dtype="float32")
+    # if pMaxDist is None or pMaxDist == pWindowSize:
+    #     stepsize = 1
+    # else:
+    #     #trapezoid, compute the stepsize such that the overlap is minimized
+    #     stepsize = max(pStepsize, 1)
+    #     stepsize = min(stepsize, pWindowSize - pMaxDist + 1) #the largest possible value such that predictions are available for all bins
+    # #sum up all the triangular or trapezoidal matrices, shifting by one along the diag. for each matrix
+    # for i in tqdm(range(0, nr_matrices, stepsize), desc="rebuilding matrix"):
+    #     j = i + flankingSize
+    #     k = j + pWindowSize
+    #     if pMaxDist is None or pMaxDist == pWindowSize: #triangles
+    #         sum_matrix[j:k,j:k][np.triu_indices(pWindowSize)] += pArrayOfTriangles[i]
+    #     else: #trapezoids
+    #         sum_matrix[j:k,j:k][np.mask_indices(pWindowSize, maskFunc, pMaxDist)] += pArrayOfTriangles[i]
+    #     count_matrix[j:k,j:k] += np.ones((pWindowSize,pWindowSize),dtype=int) #keep track of how many matrices have contributed to each position
+    # mean_matrix[count_matrix!=0] = sum_matrix[count_matrix!=0] / count_matrix[count_matrix!=0]
+    # return mean_matrix
+
+    log.info("rebuilding matrix from triangles with window size {:d} and flanking size {:d}".format(pWindowSize, pFlankingSize if pFlankingSize is not None else 0))
     if pFlankingSize == None:
         flankingSize = pWindowSize
     else:
         flankingSize = pFlankingSize
     nr_matrices = pArrayOfTriangles.shape[0]
-    sum_matrix = np.zeros( (nr_matrices - 1 + (pWindowSize+2*flankingSize), nr_matrices - 1 + (pWindowSize+2*flankingSize)) )
-    count_matrix = np.zeros_like(sum_matrix,dtype=int)    
-    mean_matrix = np.zeros_like(sum_matrix,dtype="float32")
+    log.info(f"Number of triangles: {nr_matrices}, window size: {pWindowSize}, flanking size: {flankingSize}")
+    
+    matrix_size = nr_matrices - 1 + (pWindowSize+2*flankingSize)
+    sum_matrix = sparse.lil_matrix((matrix_size, matrix_size), dtype=np.float64)
+    log.debug(f"sum_matrix shape: {sum_matrix.shape}")
+    count_matrix = sparse.lil_matrix((matrix_size, matrix_size), dtype=np.int32)
+    log.debug(f"count_matrix shape: {count_matrix.shape}")
+    mean_matrix = sparse.lil_matrix((matrix_size, matrix_size), dtype=np.float32)
+    log.debug(f"mean_matrix shape: {mean_matrix.shape}")
+    
     if pMaxDist is None or pMaxDist == pWindowSize:
         stepsize = 1
     else:
@@ -218,17 +252,43 @@ def rebuildMatrix(pArrayOfTriangles, pWindowSize, pFlankingSize=None, pMaxDist=N
         stepsize = max(pStepsize, 1)
         stepsize = min(stepsize, pWindowSize - pMaxDist + 1) #the largest possible value such that predictions are available for all bins
     #sum up all the triangular or trapezoidal matrices, shifting by one along the diag. for each matrix
+    log.info(f"Starting matrix rebuilding: {nr_matrices} triangles, window size {pWindowSize}, flanking size {flankingSize}, stepsize {stepsize}")
     for i in tqdm(range(0, nr_matrices, stepsize), desc="rebuilding matrix"):
         j = i + flankingSize
         k = j + pWindowSize
         if pMaxDist is None or pMaxDist == pWindowSize: #triangles
-            sum_matrix[j:k,j:k][np.triu_indices(pWindowSize)] += pArrayOfTriangles[i]
+            triu_indices = np.triu_indices(pWindowSize)
+            rows = triu_indices[0] + j
+            cols = triu_indices[1] + j
+            # Add values element by element for sparse matrices
+            for row, col, val in zip(rows, cols, pArrayOfTriangles[i]):
+                sum_matrix[row, col] += val
+                count_matrix[row, col] += 1
         else: #trapezoids
-            sum_matrix[j:k,j:k][np.mask_indices(pWindowSize, maskFunc, pMaxDist)] += pArrayOfTriangles[i]
-        count_matrix[j:k,j:k] += np.ones((pWindowSize,pWindowSize),dtype=int) #keep track of how many matrices have contributed to each position
-    mean_matrix[count_matrix!=0] = sum_matrix[count_matrix!=0] / count_matrix[count_matrix!=0]
+            mask_indices = np.mask_indices(pWindowSize, maskFunc, pMaxDist)
+            rows = mask_indices[0] + j
+            cols = mask_indices[1] + j
+            # Add values element by element for sparse matrices
+            for row, col, val in zip(rows, cols, pArrayOfTriangles[i]):
+                sum_matrix[row, col] += val
+                count_matrix[row, col] += 1
+    
+    # Convert to CSR for efficient division
+    sum_csr = sum_matrix.tocsr()
+    count_csr = count_matrix.tocsr()
+    
+    # Find non-zero elements in count matrix
+    nonzero_mask = count_csr.data != 0
+    
+    # Create mean matrix by dividing sum by count where count != 0
+    mean_csr = sum_csr.copy().astype(np.float32)
+    mean_csr.data[nonzero_mask] = sum_csr.data[nonzero_mask] / count_csr.data[nonzero_mask]
+    
+    # Convert back to dense numpy array to maintain original return type
+    mean_matrix = mean_csr.toarray()
+    
+    log.info("Matrix rebuilding complete. Mean matrix shape: %s", mean_matrix.shape)
     return mean_matrix
-
 def writeCooler(pMatrixList, pBinSizeInt, pOutfile, pChromosomeList, pChromSizeList=None,  pMetadata=None):
     #takes a matrix as numpy array or sparse matrix and writes a cooler matrix from it
     #modified from study project such that multiple chroms can be written to a single matrix
