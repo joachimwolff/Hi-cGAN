@@ -163,6 +163,10 @@ def parse_arguments(args=None):
     parser.add_argument("--genomicRegion", "-gr", required=False,
                         type=str,
                         help="Genomic region to plot (e.g., chr1:1000000-2000000).")
+    parser.add_argument("--allParamsOutputFile", "-apf", required=False,
+                        type=str,
+                        default="all_params.txt",
+                        help="File to write all parameters used in the run.")
     parser.add_argument('--version', action='version',
                            version='%(prog)s {}'.format(__version__))
     return parser.parse_args()
@@ -223,10 +227,29 @@ def objective(config, pArgs):
 
         trial_id = session.get_trial_id()
         log.debug("trail_id {}".format(trial_id))
+        # Write all parameters of this trial to allParamsOutputFile
+        all_params_path = os.path.join(pArgs.outputFolder, pArgs.allParamsOutputFile)
+        if os.path.exists(all_params_path):
+            file_mode = 'a'
+        else:
+            file_mode = 'w'
+        with open(all_params_path, file_mode) as f:
+            f.write(f"trial_id: {trial_id}\n")
+            for k, v in config.items():
+                if k == 'flip_samples':
+                    if v:
+                        v = 'True'
+                    else:
+                        v = 'False'
+                f.write(f"{k}: {v}\n")
+            f.write("\n")
+            f.write(f"pArgs: {pArgs}\n\n")
 
+
+        
         os.makedirs(os.path.join(pArgs.outputFolder, trial_id), exist_ok=True)
         matrixOutputNameWithoutExt = os.path.splitext(pArgs.matrixOutputName)[0]
-   
+    
         os.makedirs(os.path.join(pArgs.outputFolder, trial_id), exist_ok=True)
 
         log.debug("Start data generation")
@@ -534,7 +557,7 @@ file_type = bedgraph_matrix
 
             outfile = os.path.join(
                 pArgs.outputFolder, "pygenometracks", trial_id + '_' + matrixOutputNameWithoutExt + ".pdf")
-
+            os.makedirs(os.path.dirname(outfile), exist_ok=True)
             arguments = f"--tracks {tracks_path} --region {pArgs.genomicRegion} "\
                         f"--outFileName {outfile} --trackLabelFraction 0.1 --width 38 --height 35".split()
             try:
@@ -584,7 +607,7 @@ def run_raytune(pArgs, pContinueExperiment=None):
         "beta1": tune.uniform(0.0, 1.0),
         "flip_samples": tune.choice(["--flipSamples", ""]),
         "multiplier": tune.randint(0, 1000),
-        "batch_size": tune.randint(1,10)
+        "batch_size": tune.randint(1,100)
     }
     log.debug("Define points to evaluate")
     points_to_evaluate = [
