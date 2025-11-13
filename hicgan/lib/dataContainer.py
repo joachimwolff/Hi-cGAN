@@ -222,7 +222,7 @@ class DataContainer():
         log.debug("self.factorNames: {:s} -- container.factorNames: {:s}".format(str(self.factorNames), str(container.factorNames)))
         return factorsOK and matrixOK and windowSizeOK and flankingSizeOK and maximumDistanceOK
         
-    def writeTFRecord(self, pOutputFolder, pRecordSize=None):
+    def writeTFRecord(self, pOutputFolder, pRecordSize=None, pSaveMemory=False):
         '''
         Write a dataset to disk in tensorflow TFRecord format
         
@@ -269,11 +269,16 @@ class DataContainer():
             return storedFeaturesDict
 
         storedFeaturesDictList = []
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            results = [executor.submit(storeTFRecord, recordfile, firstIndex, lastIndex, pOutputFolder) for recordfile, firstIndex, lastIndex in zip(recordfiles, sample_indices, sample_indices[1:])]
-            for future in concurrent.futures.as_completed(results):
-                storedFeaturesDict = future.result()
+        if pSaveMemory:
+            for recordfile, firstIndex, lastIndex in zip(recordfiles, sample_indices, sample_indices[1:]):
+                storedFeaturesDict = storeTFRecord(recordfile, firstIndex, lastIndex, pOutputFolder)
                 storedFeaturesDictList.append(storedFeaturesDict)
+        else:        
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                results = [executor.submit(storeTFRecord, recordfile, firstIndex, lastIndex, pOutputFolder) for recordfile, firstIndex, lastIndex in zip(recordfiles, sample_indices, sample_indices[1:])]
+                for future in concurrent.futures.as_completed(results):
+                    storedFeaturesDict = future.result()
+                    storedFeaturesDictList.append(storedFeaturesDict)
         self.storedFiles = recordfiles
         self.storedFeatures = storedFeaturesDict
         return recordfiles

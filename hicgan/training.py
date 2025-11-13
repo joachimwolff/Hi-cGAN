@@ -108,6 +108,9 @@ def parse_arguments(args=None):
                         type=int,
                         default="",
                         help="Specify which GPU to use for training in the single GPU case. E.g. 1, 2, etc.")
+    parser.add_argument("--saveMemory", "-sm", required=False,
+                        action='store_true',
+                        help="Save memory by not loading all data into memory at once.")
     parser.add_argument('--version', action='version',
                            version='%(prog)s {}'.format(__version__))
 
@@ -130,7 +133,8 @@ def create_data(pTrainingMatrices,
                 pFlipSamples,
                 pFigureFileFormat,
                 pRecordSize,
-                noScaleNorm=False):
+                noScaleNorm=False,
+                pSaveMemory=True):
     os.makedirs(pOutputFolder, exist_ok=True)
     #few constants
     # windowSize = int(windowSize)
@@ -202,7 +206,8 @@ def create_data(pTrainingMatrices,
             msg = "Aborting. Incompatible data"
             raise SystemExit(msg)
         tfRecordFilenames.append(container.writeTFRecord(pOutputFolder=pOutputFolder,
-                                                        pRecordSize=pRecordSize))
+                                                        pRecordSize=pRecordSize,
+                                                        pSaveMemory=pSaveMemory))
         if debugstate is not None:
             if isinstance(debugstate, int):
                 idx = debugstate
@@ -382,7 +387,8 @@ def main(args=None):
                     args.flipSamples,
                     args.figureFileFormat,
                     args.recordSize,
-                    args.noScaleNorm)
+                    args.noScaleNorm,
+                    args.saveMemory)
         training(
             pTfRecordFilenames=tfRecordFilenames,
             pLengthTrainDataContainerList=traindataContainerListLength,
