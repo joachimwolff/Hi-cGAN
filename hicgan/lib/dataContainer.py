@@ -291,8 +291,14 @@ class DataContainer():
                 nr_samples_list.append(0)
         #check if all features have the same number of samples
         if len(set( [x for x in nr_samples_list if x>0] )) != 1:
+
             msg = "Error: sample binning / DNA sequence encoding went wrong"
+            msg += " -- nr_samples_list: {:s}".format(str(nr_samples_list))
+            msg += " -- featureArrays: {:s}".format(str([type(x) for x in featureArrays]))
+            msg += " -- cutouts: {:s}".format(str(cutouts))
+
             raise RuntimeError(msg)
+        print("Number of samples: " + " | ".join([str(x) for x in nr_samples_list]))
         return max(nr_samples_list)
 
     def __getMatrixData(self, idx):
