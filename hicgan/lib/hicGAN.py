@@ -439,9 +439,12 @@ class HiCGAN():
         predictedArray = []
         for batch in tqdm(test_ds, desc="Predicting", total=steps_per_record):
             predBatch = self.predictionStep(input_batch=batch).numpy()
-            for i in range(predBatch.shape[0]):
-                predictedArray.append(predBatch[i][:,:,0])        
-        predictedArray = np.array(predictedArray)
+            # Extract and append only the needed slice to reduce memory copies
+            predictedArray.append(predBatch[:, :, :, 0])
+            # Free memory from the prediction batch
+            del predBatch
+        # Concatenate along batch dimension instead of converting list
+        predictedArray = np.concatenate(predictedArray, axis=0)
         return predictedArray
     
     @tf.function
