@@ -111,6 +111,10 @@ def parse_arguments(args=None):
     parser.add_argument("--saveMemory", "-sm", required=False,
                         action='store_true',
                         help="Save memory by not loading all data into memory at once.")
+    parser.add_argument("--threads", "-t", required=False,
+                        type=int,
+                        default=4,
+                        help="Number of threads to use for TFRecord writing.")
     parser.add_argument('--version', action='version',
                            version='%(prog)s {}'.format(__version__))
 
@@ -134,7 +138,8 @@ def create_data(pTrainingMatrices,
                 pFigureFileFormat,
                 pRecordSize,
                 noScaleNorm=False,
-                pSaveMemory=True):
+                pSaveMemory=True,
+                pThreads=4):
     os.makedirs(pOutputFolder, exist_ok=True)
     #few constants
     # windowSize = int(windowSize)
@@ -207,7 +212,8 @@ def create_data(pTrainingMatrices,
             raise SystemExit(msg)
         tfRecordFilenames.append(container.writeTFRecord(pOutputFolder=pOutputFolder,
                                                         pRecordSize=pRecordSize,
-                                                        pSaveMemory=pSaveMemory))
+                                                        pSaveMemory=pSaveMemory,
+                                                        pThreads=pThreads))
         if debugstate is not None:
             if isinstance(debugstate, int):
                 idx = debugstate
@@ -388,7 +394,8 @@ def main(args=None):
                     args.figureFileFormat,
                     args.recordSize,
                     args.noScaleNorm,
-                    args.saveMemory)
+                    args.saveMemory,
+                    args.threads)
         training(
             pTfRecordFilenames=tfRecordFilenames,
             pLengthTrainDataContainerList=traindataContainerListLength,
