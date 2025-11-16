@@ -124,11 +124,34 @@ def prediction(pTrainedModel, pPredictionChromosomesFolders, pPredictionChromoso
         testDs = testDs.map(lambda x: records.parse_function(x, storedFeaturesDict), num_parallel_calls=tf.data.experimental.AUTOTUNE)
         testDs = testDs.batch(batchSize, drop_remainder=False)
         testDs = testDs.prefetch(tf.data.experimental.AUTOTUNE)
-        predArray = trained_GAN.predict(test_ds=testDs, steps_per_record=nr_samples)
-        triu_indices = np.triu_indices(windowSize)
-        predArray = np.array([np.array(x[triu_indices]) for x in predArray])
+
+        # Predict in batches to manage memory usage
+        predBatches = []
+        total_batches = 10  # You can adjust this to 5 or more
+        batch_size = nr_samples // total_batches
+        # for batch_idx in range(total_batches):
+        #     log.debug(f"Predicting batch {batch_idx + 1} of {total_batches}...")
+        #     batch_pred = trained_GAN.predict(test_ds=testDs.skip(batch_idx * batch_size).take(batch_size), steps_per_record=1)
+        #     for batch in batch_pred:
+        #         triu_indices = np.triu_indices(windowSize)
+        #         batch_pred_array = np.array(batch[triu_indices])
+        #         predBatches.append(batch_pred_array)
+        #         del batch_pred_array
+        #     del batch_pred
+        # batch_size = 10000  # Define your desired batch size here
+        for batch_idx in range(0, nr_samples, batch_size):
+            batch_pred = trained_GAN.predict(test_ds=testDs.skip(batch_idx).take(batch_size), steps_per_record=1)
+            triu_indices = np.triu_indices(windowSize)
+            batch_pred_array = np.array([np.array(x[triu_indices], dtype=np.float16) for x in batch_pred], dtype=np.float16)
+            predBatches.append(batch_pred_array)
+        predArray = np.concatenate(predBatches, axis=0).astype(np.float16)
+        del predBatches
         predList.append(predArray)
+        del predArray
+    log.debug("Prediction on all chromosomes completed.")
+    log.debug("Rebuilding full matrices from predicted triangles...")
     predList = [utils.rebuildMatrix(pArrayOfTriangles=x, pWindowSize=windowSize, pFlankingSize=windowSize) for x in predList]
+    log.debug("Scaling predicted matrices...")
     predList = [utils.scaleArray(x) * multiplier for x in predList]
 
     matrixname = os.path.join(outputFolder, pMatrixOutputName)

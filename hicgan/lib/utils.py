@@ -310,6 +310,57 @@ def rebuildMatrix(pArrayOfTriangles, pWindowSize, pFlankingSize=None, pMaxDist=N
     rows_all, cols_all, vals_all = [], [], []
     rows_count, cols_count, vals_count = [], [], []
 
+    # for i in tqdm(range(0, nr_matrices, stepsize), desc="rebuilding matrix"):
+    #     j = i + flankingSize
+    #     k = j + pWindowSize
+
+    #     if pMaxDist is None or pMaxDist == pWindowSize:
+    #         r, c = np.triu_indices(pWindowSize)
+    #     else:
+    #         r, c = np.mask_indices(pWindowSize, maskFunc, pMaxDist)
+
+    #     rows = r + j
+    #     cols = c + j
+
+    #     tri = pArrayOfTriangles[i]
+
+    #     # --- FIX: handle 1D or 2D triangles ---
+    #     if tri.ndim == 1:
+    #         vals = tri
+    #     elif tri.ndim == 2:
+    #         vals = tri[r, c]
+    #     else:
+    #         raise ValueError(f"Unexpected triangle shape: {tri.shape}")
+
+    #     rows_all.append(rows)
+    #     cols_all.append(cols)
+    #     vals_all.append(vals)
+    #     log.debug(f"Processed triangle {i}: added {len(vals)} values")
+
+    #     rows_count.append(rows)
+    #     cols_count.append(cols)
+    #     vals_count.append(np.ones_like(vals, dtype=np.int32))
+    #     log.debug(f"Count matrix updated for triangle {np.ones_like(vals, dtype=np.int32)}")
+    #     break
+    # # Combine all updates in a single sparse build
+    # rows_all = np.concatenate(rows_all)
+    # cols_all = np.concatenate(cols_all)
+    # vals_all = np.concatenate(vals_all, dtype=np.float32)
+    # rows_count = np.concatenate(rows_count)
+    # cols_count = np.concatenate(cols_count)
+    # vals_count = np.concatenate(vals_count)
+
+    # # Construct sparse sum and count matrices
+    # sum_matrix = sparse.csr_matrix(
+    #     (vals_all, (rows_all, cols_all)), shape=(matrix_size, matrix_size), dtype=np.float32
+    # )#.tocsr()
+    # count_matrix = sparse.csr_matrix(
+    #     (vals_count, (rows_count, cols_count)), shape=(matrix_size, matrix_size), dtype=np.int32
+    # )#.tocsr()
+
+    sum_matrix = sparse.lil_matrix((matrix_size, matrix_size), dtype=np.float32)
+    count_matrix = sparse.lil_matrix((matrix_size, matrix_size), dtype=np.int32)
+
     for i in tqdm(range(0, nr_matrices, stepsize), desc="rebuilding matrix"):
         j = i + flankingSize
         k = j + pWindowSize
@@ -321,49 +372,45 @@ def rebuildMatrix(pArrayOfTriangles, pWindowSize, pFlankingSize=None, pMaxDist=N
 
         rows = r + j
         cols = c + j
-
         tri = pArrayOfTriangles[i]
 
-        # --- FIX: handle 1D or 2D triangles ---
-        if tri.ndim == 1:
-            vals = tri
-        elif tri.ndim == 2:
-            vals = tri[r, c]
-        else:
-            raise ValueError(f"Unexpected triangle shape: {tri.shape}")
+        vals = tri if tri.ndim == 1 else tri[r, c]
+        sum_matrix[rows, cols] += vals
 
-        rows_all.append(rows)
-        cols_all.append(cols)
-        vals_all.append(vals)
+        vals_count = np.ones_like(rows, dtype=np.int32)
+        count_matrix[rows, cols] += vals_count
 
-        rows_count.append(rows)
-        cols_count.append(cols)
-        vals_count.append(np.ones_like(vals, dtype=np.int32))
+    # Convert once at the end
+    # sum_matrix = sum_matrix.tocsr()
+    # count_matrix = count_matrix.tocsr()
 
-    # Combine all updates in a single sparse build
-    rows_all = np.concatenate(rows_all)
-    cols_all = np.concatenate(cols_all)
-    vals_all = np.concatenate(vals_all)
-    rows_count = np.concatenate(rows_count)
-    cols_count = np.concatenate(cols_count)
-    vals_count = np.concatenate(vals_count)
+    # mean_matrix = sum_matrix.copy().astype(np.float32)
+    # nonzero_mask = count_matrix.data != 0
+    # mean_matrix.data[nonzero_mask] = sum_matrix.data[nonzero_mask] / count_matrix.data[nonzero_mask]
 
-    # Construct sparse sum and count matrices
-    sum_matrix = sparse.coo_matrix(
-        (vals_all, (rows_all, cols_all)), shape=(matrix_size, matrix_size), dtype=np.float64
-    ).tocsr()
-    count_matrix = sparse.coo_matrix(
-        (vals_count, (rows_count, cols_count)), shape=(matrix_size, matrix_size), dtype=np.int32
-    ).tocsr()
+    # result = mean_matrix
+    # # result = mean_matrix
+    # log.info("Matrix rebuilding complete. Final matrix shape: %s", result.shape)
+    # return result
+    # Convert to CSR
+    sum_matrix = sum_matrix.tocsr()
+    count_matrix = count_matrix.tocsr()
 
-    mean_matrix = sum_matrix.copy().astype(np.float32)
+    # Avoid division by zero
+    count_matrix.data = count_matrix.data.astype(np.float32)
     nonzero_mask = count_matrix.data != 0
-    mean_matrix.data[nonzero_mask] = sum_matrix.data[nonzero_mask] / count_matrix.data[nonzero_mask]
+    count_matrix.data[~nonzero_mask] = 1.0  # prevent div/0, will be masked later
 
-    result = mean_matrix.toarray()
+    # Compute mean only where count > 0
+    count_matrix = count_matrix.astype(np.float32).tocsr()
+    inv_count = count_matrix.copy()
+    inv_count.data = 1.0 / inv_count.data  # invert only the nonzeros
 
-    log.info("Matrix rebuilding complete. Final matrix shape: %s", result.shape)
-    return result
+    # Multiply elementwise
+    mean_matrix = sum_matrix.multiply(inv_count)
+    # mean_matrix.eliminate_zeros()
+    mean_matrix.eliminate_zeros()
+    return mean_matrix
 
 def writeCooler(pMatrixList, pBinSizeInt, pOutfile, pChromosomeList, pChromSizeList=None,  pMetadata=None):
     #takes a matrix as numpy array or sparse matrix and writes a cooler matrix from it
