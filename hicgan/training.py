@@ -39,7 +39,7 @@ def parse_arguments(args=None):
                         type=str, nargs='+',
                         help="Path where chromatin factors for validation reside (bigwig files).")
     parser.add_argument("--windowSize", "-ws", required=True,
-                        type=int, choices=[64, 128, 256, 512, 1024],
+                        type=int, choices=[64, 128, 256, 512, 768, 1024],
                         help="window size for submatrices.")
     parser.add_argument("--outputFolder", "-o", required=True,
                         type=str,

@@ -290,7 +290,7 @@ def plotLoss(pGeneratorLossValueLists, pDiscLossValueLists, pGeneratorLossNameLi
 #     log.info("Matrix rebuilding complete. Mean matrix shape: %s", mean_matrix.shape)
 #     return mean_matrix
 
-def rebuildMatrix(pArrayOfTriangles, pWindowSize, pFlankingSize=None, pMaxDist=None, pStepsize=1):
+def rebuildMatrix(pArrayOfTriangles, pWindowSize, pFlankingSize=None, pMaxDist=None, pStepsize=1, pSaveMemory=False):
     log.info("Rebuilding matrix from triangles with window size %d", pWindowSize)
     flankingSize = pFlankingSize if pFlankingSize is not None else pWindowSize
     nr_matrices = pArrayOfTriangles.shape[0]
@@ -307,109 +307,108 @@ def rebuildMatrix(pArrayOfTriangles, pWindowSize, pFlankingSize=None, pMaxDist=N
 
     log.info(f"Stepsize set to {stepsize}")
 
-    rows_all, cols_all, vals_all = [], [], []
-    rows_count, cols_count, vals_count = [], [], []
+    
+    if pSaveMemory:
+        sum_matrix = sparse.lil_matrix((matrix_size, matrix_size), dtype=np.float32)
+        count_matrix = sparse.lil_matrix((matrix_size, matrix_size), dtype=np.int32)
 
-    # for i in tqdm(range(0, nr_matrices, stepsize), desc="rebuilding matrix"):
-    #     j = i + flankingSize
-    #     k = j + pWindowSize
+        for i in tqdm(range(0, nr_matrices, stepsize), desc="rebuilding matrix"):
+            j = i + flankingSize
+            k = j + pWindowSize
 
-    #     if pMaxDist is None or pMaxDist == pWindowSize:
-    #         r, c = np.triu_indices(pWindowSize)
-    #     else:
-    #         r, c = np.mask_indices(pWindowSize, maskFunc, pMaxDist)
+            if pMaxDist is None or pMaxDist == pWindowSize:
+                r, c = np.triu_indices(pWindowSize)
+            else:
+                r, c = np.mask_indices(pWindowSize, maskFunc, pMaxDist)
 
-    #     rows = r + j
-    #     cols = c + j
+            rows = r + j
+            cols = c + j
+            tri = pArrayOfTriangles[i]
 
-    #     tri = pArrayOfTriangles[i]
+            vals = tri if tri.ndim == 1 else tri[r, c]
+            sum_matrix[rows, cols] += vals
 
-    #     # --- FIX: handle 1D or 2D triangles ---
-    #     if tri.ndim == 1:
-    #         vals = tri
-    #     elif tri.ndim == 2:
-    #         vals = tri[r, c]
-    #     else:
-    #         raise ValueError(f"Unexpected triangle shape: {tri.shape}")
+            vals_count = np.ones_like(rows, dtype=np.int32)
+            count_matrix[rows, cols] += vals_count
 
-    #     rows_all.append(rows)
-    #     cols_all.append(cols)
-    #     vals_all.append(vals)
-    #     log.debug(f"Processed triangle {i}: added {len(vals)} values")
 
-    #     rows_count.append(rows)
-    #     cols_count.append(cols)
-    #     vals_count.append(np.ones_like(vals, dtype=np.int32))
-    #     log.debug(f"Count matrix updated for triangle {np.ones_like(vals, dtype=np.int32)}")
-    #     break
-    # # Combine all updates in a single sparse build
-    # rows_all = np.concatenate(rows_all)
-    # cols_all = np.concatenate(cols_all)
-    # vals_all = np.concatenate(vals_all, dtype=np.float32)
-    # rows_count = np.concatenate(rows_count)
-    # cols_count = np.concatenate(cols_count)
-    # vals_count = np.concatenate(vals_count)
+        sum_matrix = sum_matrix.tocsr()
+        count_matrix = count_matrix.tocsr()
 
-    # # Construct sparse sum and count matrices
-    # sum_matrix = sparse.csr_matrix(
-    #     (vals_all, (rows_all, cols_all)), shape=(matrix_size, matrix_size), dtype=np.float32
-    # )#.tocsr()
-    # count_matrix = sparse.csr_matrix(
-    #     (vals_count, (rows_count, cols_count)), shape=(matrix_size, matrix_size), dtype=np.int32
-    # )#.tocsr()
+        # Avoid division by zero
+        count_matrix.data = count_matrix.data.astype(np.float32)
+        nonzero_mask = count_matrix.data != 0
+        count_matrix.data[~nonzero_mask] = 1.0  # prevent div/0, will be masked later
 
-    sum_matrix = sparse.lil_matrix((matrix_size, matrix_size), dtype=np.float32)
-    count_matrix = sparse.lil_matrix((matrix_size, matrix_size), dtype=np.int32)
+        # Compute mean only where count > 0
+        count_matrix = count_matrix.astype(np.float32).tocsr()
+        inv_count = count_matrix.copy()
+        inv_count.data = 1.0 / inv_count.data  # invert only the nonzeros
 
-    for i in tqdm(range(0, nr_matrices, stepsize), desc="rebuilding matrix"):
-        j = i + flankingSize
-        k = j + pWindowSize
+        # Multiply elementwise
+        mean_matrix = sum_matrix.multiply(inv_count)
+        # mean_matrix.eliminate_zeros()
+        mean_matrix.eliminate_zeros()
+    else:
+        rows_all, cols_all, vals_all = [], [], []
+        rows_count, cols_count, vals_count = [], [], []
 
-        if pMaxDist is None or pMaxDist == pWindowSize:
-            r, c = np.triu_indices(pWindowSize)
-        else:
-            r, c = np.mask_indices(pWindowSize, maskFunc, pMaxDist)
+        for i in tqdm(range(0, nr_matrices, stepsize), desc="rebuilding matrix"):
+            j = i + flankingSize
+            k = j + pWindowSize
 
-        rows = r + j
-        cols = c + j
-        tri = pArrayOfTriangles[i]
+            if pMaxDist is None or pMaxDist == pWindowSize:
+                r, c = np.triu_indices(pWindowSize)
+            else:
+                r, c = np.mask_indices(pWindowSize, maskFunc, pMaxDist)
 
-        vals = tri if tri.ndim == 1 else tri[r, c]
-        sum_matrix[rows, cols] += vals
+            rows = r + j
+            cols = c + j
 
-        vals_count = np.ones_like(rows, dtype=np.int32)
-        count_matrix[rows, cols] += vals_count
+            tri = pArrayOfTriangles[i]
 
-    # Convert once at the end
-    # sum_matrix = sum_matrix.tocsr()
-    # count_matrix = count_matrix.tocsr()
+            # --- FIX: handle 1D or 2D triangles ---
+            if tri.ndim == 1:
+                vals = tri
+            elif tri.ndim == 2:
+                vals = tri[r, c]
+            else:
+                raise ValueError(f"Unexpected triangle shape: {tri.shape}")
 
-    # mean_matrix = sum_matrix.copy().astype(np.float32)
-    # nonzero_mask = count_matrix.data != 0
-    # mean_matrix.data[nonzero_mask] = sum_matrix.data[nonzero_mask] / count_matrix.data[nonzero_mask]
+            rows_all.append(rows)
+            cols_all.append(cols)
+            vals_all.append(vals)
+            log.debug(f"Processed triangle {i}: added {len(vals)} values")
 
-    # result = mean_matrix
-    # # result = mean_matrix
-    # log.info("Matrix rebuilding complete. Final matrix shape: %s", result.shape)
-    # return result
-    # Convert to CSR
-    sum_matrix = sum_matrix.tocsr()
-    count_matrix = count_matrix.tocsr()
+            rows_count.append(rows)
+            cols_count.append(cols)
+            vals_count.append(np.ones_like(vals, dtype=np.int32))
+            log.debug(f"Count matrix updated for triangle {np.ones_like(vals, dtype=np.int32)}")
+            break
+        # Combine all updates in a single sparse build
+        rows_all = np.concatenate(rows_all)
+        cols_all = np.concatenate(cols_all)
+        vals_all = np.concatenate(vals_all, dtype=np.float32)
+        rows_count = np.concatenate(rows_count)
+        cols_count = np.concatenate(cols_count)
+        vals_count = np.concatenate(vals_count)
 
-    # Avoid division by zero
-    count_matrix.data = count_matrix.data.astype(np.float32)
-    nonzero_mask = count_matrix.data != 0
-    count_matrix.data[~nonzero_mask] = 1.0  # prevent div/0, will be masked later
+        # Construct sparse sum and count matrices
+        sum_matrix = sparse.coo_matrix(
+            (vals_all, (rows_all, cols_all)), shape=(matrix_size, matrix_size), dtype=np.float32
+        ).tocsr()
+        count_matrix = sparse.coo_matrix(
+            (vals_count, (rows_count, cols_count)), shape=(matrix_size, matrix_size), dtype=np.int32
+        ).tocsr()
 
-    # Compute mean only where count > 0
-    count_matrix = count_matrix.astype(np.float32).tocsr()
-    inv_count = count_matrix.copy()
-    inv_count.data = 1.0 / inv_count.data  # invert only the nonzeros
+        # Convert once at the end
+        # sum_matrix = sum_matrix.tocsr()
+        # count_matrix = count_matrix.tocsr()
 
-    # Multiply elementwise
-    mean_matrix = sum_matrix.multiply(inv_count)
-    # mean_matrix.eliminate_zeros()
-    mean_matrix.eliminate_zeros()
+        mean_matrix = sum_matrix.copy().astype(np.float32)
+        nonzero_mask = count_matrix.data != 0
+        mean_matrix.data[nonzero_mask] = sum_matrix.data[nonzero_mask] / count_matrix.data[nonzero_mask]
+
     return mean_matrix
 
 def writeCooler(pMatrixList, pBinSizeInt, pOutfile, pChromosomeList, pChromSizeList=None,  pMetadata=None):

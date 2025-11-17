@@ -50,13 +50,19 @@ def parse_arguments(args=None):
                         help="Batch size for predicting")
     parser.add_argument("--windowSize", "-ws", required=False,
                         type=int,
-                        choices=[64, 128, 256, 512, 1024],
+                        choices=[64, 128, 256, 512, 768, 1024],
                         help="Window size for predicting; must be the same as in trained model. Supported values are 64, 128, and 256")
+    parser.add_argument("--saveMemory", "-sm", action="store_true",
+                        help="Enable memory-saving mode for prediction")
+    parser.add_argument("--numberOfBatches", "-nb", required=False,
+                        type=int,
+                        default=20,
+                        help="Number of batches to split predictions when --saveMemory is enabled")
     parser.add_argument('--version', action='version',
                            version='%(prog)s {}'.format(__version__))
     return parser
 
-def prediction(pTrainedModel, pPredictionChromosomesFolders, pPredictionChromosomes, pOutputFolder, pMultiplier, pBinSize, pBatchSize, pWindowSize, pMatrixOutputName, pParameterOutputFile):
+def prediction(pTrainedModel, pPredictionChromosomesFolders, pPredictionChromosomes, pOutputFolder, pMultiplier, pBinSize, pBatchSize, pWindowSize, pMatrixOutputName, pParameterOutputFile, pSaveMemory=False, pNumberOfBatches=20):
     trainedmodel = pTrainedModel
     predictionChromosomesFolders = pPredictionChromosomesFolders
     predictionChromosomes = pPredictionChromosomes
@@ -127,30 +133,31 @@ def prediction(pTrainedModel, pPredictionChromosomesFolders, pPredictionChromoso
 
         # Predict in batches to manage memory usage
         predBatches = []
-        total_batches = 10  # You can adjust this to 5 or more
-        batch_size = nr_samples // total_batches
-        # for batch_idx in range(total_batches):
-        #     log.debug(f"Predicting batch {batch_idx + 1} of {total_batches}...")
-        #     batch_pred = trained_GAN.predict(test_ds=testDs.skip(batch_idx * batch_size).take(batch_size), steps_per_record=1)
-        #     for batch in batch_pred:
-        #         triu_indices = np.triu_indices(windowSize)
-        #         batch_pred_array = np.array(batch[triu_indices])
-        #         predBatches.append(batch_pred_array)
-        #         del batch_pred_array
-        #     del batch_pred
-        # batch_size = 10000  # Define your desired batch size here
-        for batch_idx in range(0, nr_samples, batch_size):
-            batch_pred = trained_GAN.predict(test_ds=testDs.skip(batch_idx).take(batch_size), steps_per_record=1)
+        if pSaveMemory:
+            total_batches = pNumberOfBatches  # You can adjust this to 5 or more
+            batch_size = nr_samples // total_batches
+            log.debug("Predicting on dataset in %d batches to save memory..." % total_batches)
+            for batch_idx in range(0, nr_samples, batch_size):
+                batch_pred = trained_GAN.predict(test_ds=testDs.skip(batch_idx).take(batch_size), steps_per_record=1)
+                triu_indices = np.triu_indices(windowSize)
+                batch_pred_array = np.array([np.array(x[triu_indices], dtype=np.float16) for x in batch_pred], dtype=np.float16)
+                predBatches.append(batch_pred_array)
+            predArray = np.concatenate(predBatches, axis=0).astype(np.float16)
+            del predBatches
+            predList.append(predArray)
+            del predArray
+        else:
+            log.debug("Predicting on full dataset...")
+            predDs = trained_GAN.predict(test_ds=testDs, steps_per_record=1)
+            log.debug("Converting predictions to numpy arrays...")
             triu_indices = np.triu_indices(windowSize)
-            batch_pred_array = np.array([np.array(x[triu_indices], dtype=np.float16) for x in batch_pred], dtype=np.float16)
-            predBatches.append(batch_pred_array)
-        predArray = np.concatenate(predBatches, axis=0).astype(np.float16)
-        del predBatches
-        predList.append(predArray)
-        del predArray
+            predArray = np.array([np.array(x[triu_indices]) for x in predDs])
+            predList.append(predArray)
+            del predDs
+            del predArray
     log.debug("Prediction on all chromosomes completed.")
     log.debug("Rebuilding full matrices from predicted triangles...")
-    predList = [utils.rebuildMatrix(pArrayOfTriangles=x, pWindowSize=windowSize, pFlankingSize=windowSize) for x in predList]
+    predList = [utils.rebuildMatrix(pArrayOfTriangles=x, pWindowSize=windowSize, pFlankingSize=windowSize, pSaveMemory=pSaveMemory) for x in predList]
     log.debug("Scaling predicted matrices...")
     predList = [utils.scaleArray(x) * multiplier for x in predList]
 
@@ -186,4 +193,6 @@ def main(args=None):
         pBatchSize=args.batchSize,
         pWindowSize=args.windowSize,
         pMatrixOutputName=args.matrixOutputName,
-        pParameterOutputFile=args.parameterOutputFile)
+        pParameterOutputFile=args.parameterOutputFile,
+        pSaveMemory=args.saveMemory,
+        pNumberOfBatches=args.numberOfBatches)
