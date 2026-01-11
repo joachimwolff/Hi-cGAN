@@ -24,6 +24,8 @@ from sklearn.preprocessing import PolynomialFeatures
 from sklearn.pipeline import make_pipeline
 import itertools
 from sklearn.model_selection import train_test_split, cross_val_score
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.metrics import mean_squared_error

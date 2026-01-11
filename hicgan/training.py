@@ -346,7 +346,7 @@ def delete_model_files(pTFRecordFiles):
 
 def main(args=None):
     args = parse_arguments().parse_args(args)
-    
+    print("foo test 1234")
     for matrix in args.trainingMatrices + args.validationMatrices:
         if not os.path.exists(matrix):
             msg = "Exiting. Matrix file not found: {:s}".format(matrix)

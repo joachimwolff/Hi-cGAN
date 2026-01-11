@@ -1,7 +1,10 @@
 import tensorflow as tf
 from tensorflow.keras.layers import Conv2D, Conv1D, BatchNormalization, LeakyReLU, Conv2DTranspose, Dropout, ReLU, Flatten, Dense
+from tensorflow.keras.layers import GroupNormalization
 import numpy as np
 import os
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt 
 from tqdm import tqdm
 from . import utils
@@ -96,7 +99,8 @@ class HiCGAN():
             if kernelWidth > 1:
                 convParamDict["padding"] = "same"
             x = Conv1D(**convParamDict)(x)
-            x = BatchNormalization()(x)
+            # x = BatchNormalization()(x)
+            x = GroupNormalization(groups=nr_filters, axis=-1)(x)
             if apply_dropout:
                 x = Dropout(0.5)(x)
             x = tf.keras.layers.LeakyReLU(alpha=0.2)(x)
@@ -126,7 +130,8 @@ class HiCGAN():
         result.add(Conv2D(filters, size, strides=2, padding='same',
                                 kernel_initializer=initializer, use_bias=False))
         if apply_batchnorm:
-            result.add(BatchNormalization())
+            # result.add(BatchNormalization())
+            result.add(GroupNormalization(groups=filters, axis=-1))
         result.add(LeakyReLU(alpha=0.2))
         return result
 
@@ -138,7 +143,8 @@ class HiCGAN():
                                             padding='same',
                                             kernel_initializer=initializer,
                                             use_bias=False))
-        result.add(BatchNormalization())
+        # result.add(BatchNormalization())
+        result.add(GroupNormalization(groups=filters, axis=-1))
         if apply_dropout:
             result.add(Dropout(0.5))
         result.add(ReLU())
@@ -203,7 +209,7 @@ class HiCGAN():
         for up, skip in zip(up_stack, skips):
             x = up(x)
             x = tf.keras.layers.Concatenate()([x, skip])
-
+        last = tf.keras.layers.Conv2DTranspose(self.OUTPUT_CHANNELS, 4, strides=2, padding='same', kernel_initializer=initializer) 
         x = last(x)
         #enforce symmetry
         x_T = tf.keras.layers.Permute((2,1,3))(x)
@@ -261,7 +267,7 @@ class HiCGAN():
         d_T = tf.keras.layers.Permute((2,1,3))(d)
         d = tf.keras.layers.Add()([d, d_T])
         d = tf.keras.layers.Lambda(lambda z: 0.5*z)(d)
-        d = BatchNormalization()(d)
+        # d = BatchNormalization()(d)
         d = LeakyReLU(alpha=0.2)(d)
         d = Conv2D(1, 4, strides=1, padding="same",
                         kernel_initializer=initializer)(d) #(bs, inp.size/8, inp.size/8, 1)
@@ -435,36 +441,150 @@ class HiCGAN():
         tf.keras.utils.plot_model(self.generator_embedding, show_shapes=True, to_file=generatorEmbeddingPlotName)
         tf.keras.utils.plot_model(self.discriminator_embedding, show_shapes=True, to_file=discriminatorEmbeddingPlotName)
 
+    # def predict(self, test_ds, steps_per_record):
+    #     predictedArray = []
+    #     for batch in tqdm(test_ds, desc="Predicting", total=steps_per_record):
+    #         predBatch = self.predictionStep(input_batch=batch, training=False)
+    #         # Extract and append only the needed slice to reduce memory copies
+    #         predictedArray.append(predBatch[:, :, :, 0].numpy())
+    #         # Free memory from the prediction batch
+    #         del predBatch
+    #     # Concatenate along batch dimension instead of converting list
+    #     predictedArray = np.concatenate(predictedArray, axis=0)
+    #     return predictedArray
     def predict(self, test_ds, steps_per_record):
         predictedArray = []
-        for batch in tqdm(test_ds, desc="Predicting", total=steps_per_record):
-            predBatch = self.predictionStep(input_batch=batch, training=False)
-            # Extract and append only the needed slice to reduce memory copies
-            predictedArray.append(predBatch[:, :, :, 0].numpy())
-            # Free memory from the prediction batch
+
+        if self.generator is None:
+            raise ValueError("Generator is None. Please call loadGenerator() first.")
+
+        # Debug print to verify request
+        print(f"DEBUG: Starting prediction. Steps arg: {steps_per_record}.")
+
+        # Iterate over dataset
+        # We don't use 'total=steps_per_record' to avoid confusing tqdm if steps is wrong
+        for i, batch in tqdm(enumerate(test_ds), desc="Predicting"):
+            
+            # --- 1. Robust Input Extraction ---
+            input_data = None
+            
+            # Check for Tuple/List (common in tf.data: (input, target))
+            if isinstance(batch, (tuple, list)):
+                # If the first element is a dict (feature dict), use that
+                if isinstance(batch[0], dict) and "factorData" in batch[0]:
+                    input_data = batch[0]["factorData"]
+                else:
+                    input_data = batch[0] # Assume index 0 is input
+            # Check for Dict (direct feature dict)
+            elif isinstance(batch, dict):
+                input_data = batch.get("factorData", batch)
+            # Fallback (tensor)
+            else:
+                input_data = batch
+
+            # --- 2. Prediction ---
+            # training=False is critical
+            predBatch = self.predictionStep(input_batch=input_data, training=False)
+            
+            # --- 3. Cleaning & Formatting ---
+            val = predBatch.numpy()
+            
+            # Debug first batch shape to ensure model is outputting what we expect
+            if i == 0:
+                print(f"DEBUG: First batch raw output shape: {val.shape}")
+
+            # Squeeze channel dimension if present: (Batch, 64, 64, 1) -> (Batch, 64, 64)
+            if val.ndim == 4 and val.shape[-1] == 1:
+                val = np.squeeze(val, axis=-1)
+            
+            predictedArray.append(val)
+
+            # Cleanup
             del predBatch
-        # Concatenate along batch dimension instead of converting list
-        predictedArray = np.concatenate(predictedArray, axis=0)
-        return predictedArray
+            del val
+
+        # --- 4. Aggregation ---
+        if len(predictedArray) == 0:
+            print("WARNING: predictedArray is empty!")
+            return np.array([])
+
+        # Concatenate all batches into one large array: (Total_Samples, 64, 64)
+        total_prediction = np.concatenate(predictedArray, axis=0)
+        
+        print(f"DEBUG: Final Reference Shape returned: {total_prediction.shape}")
+        
+        return total_prediction
     
     @tf.function
     def predictionStep(self, input_batch, training=False):
         return self.generator(input_batch, training=training)
   
     
+    # def loadGenerator(self, trainedModelPath: str):
+    #     '''
+    #         load a trained generator model for prediction
+    #     '''
+    #     try:
+    #         trainedModel = tf.keras.models.load_model(filepath=trainedModelPath, 
+    #                                               custom_objects={"CustomReshapeLayer": CustomReshapeLayer(self.input_size)}, safe_mode=False)
+    #         self.generator = trainedModel
+    #     except Exception as e:
+    #         msg = str(e)
+    #         msg += "\nError: failed to load trained model"
+    #         raise ValueError(msg)
     def loadGenerator(self, trainedModelPath: str):
         '''
-            load a trained generator model for prediction
+        Load a trained generator model for prediction with detailed diagnostics.
         '''
         try:
-            trainedModel = tf.keras.models.load_model(filepath=trainedModelPath, 
-                                                  custom_objects={"CustomReshapeLayer": CustomReshapeLayer(self.input_size)}, safe_mode=False)
-            self.generator = trainedModel
-        except Exception as e:
-            msg = str(e)
-            msg += "\nError: failed to load trained model"
-            raise ValueError(msg)
+            print(f"Attempting to load model from: {trainedModelPath}")
+            
+            # 1. Define custom layers
+            custom_layers = {
+                "CustomReshapeLayer": CustomReshapeLayer,
+            }
+            
+            # 2. Add GroupNormalization
+            # Try native Keras (TF 2.12+)
+            # if hasa?ttr(tf.keras.layers, "GroupNormalization"):
+            custom_layers["GroupNormalization"] = tf.keras.layers.GroupNormalization
+            # else:
+            #     # Fallback for older TF versions using addons
+            #     try:
+            #         import tensorflow_addons as tfa
+            #         custom_layers["GroupNormalization"] = tfa.layers.GroupNormalization
+            #     except ImportError:
+            #         print("Warning: Could not import GroupNormalization from keras or addons.")
 
+            # 3. Load the model
+            self.generator = tf.keras.models.load_model(
+                filepath=trainedModelPath, 
+                custom_objects=custom_layers, 
+                safe_mode=False
+            )
+            print("Model loaded successfully. Running diagnostics...")
+
+            # --- DIAGNOSTICS ---
+            # Check 1: Are weights all zeros or NaNs?
+            all_weights = self.generator.get_weights()
+            if len(all_weights) > 0:
+                total_weight_sum = np.sum([np.sum(np.abs(w)) for w in all_weights])
+                has_nan = np.any([np.isnan(np.sum(w)) for w in all_weights])
+                
+                print(f" -> Total sum of weights: {total_weight_sum}")
+                
+                if has_nan:
+                    raise ValueError("CRITICAL: The loaded model contains NaN (Not a Number) weights. Training failed. Decreasing learning rate or increasing GroupNorm epsilon might help.")
+                
+                if total_weight_sum == 0:
+                    raise ValueError("CRITICAL: All model weights are ZERO. The model did not learn or was not saved correctly.")
+            
+            print(" -> Diagnostics passed. Weights look valid.")
+
+        except Exception as e:
+            msg = f"Failed to load generator.\nDetail: {str(e)}"
+            raise ValueError(msg)
+        
 class CustomReshapeLayer(tf.keras.layers.Layer):
     '''
     reshape a 1D tensor such that it represents 

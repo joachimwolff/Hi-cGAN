@@ -4,6 +4,8 @@ import cooler
 import pyBigWig
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.colors as colors
 from matplotlib.ticker import MultipleLocator
@@ -12,6 +14,10 @@ from scipy import sparse
 from sklearn import metrics as metrics
 import traceback
 
+
+import numpy as np
+from scipy import ndimage
+from scipy.sparse import csr_matrix, issparse
 import logging
 log = logging.getLogger(__name__)
 
@@ -384,7 +390,7 @@ def rebuildMatrix(pArrayOfTriangles, pWindowSize, pFlankingSize=None, pMaxDist=N
             cols_count.append(cols)
             vals_count.append(np.ones_like(vals, dtype=np.int32))
             log.debug(f"Count matrix updated for triangle {np.ones_like(vals, dtype=np.int32)}")
-            break
+            # break
         # Combine all updates in a single sparse build
         rows_all = np.concatenate(rows_all)
         cols_all = np.concatenate(cols_all)
@@ -409,7 +415,70 @@ def rebuildMatrix(pArrayOfTriangles, pWindowSize, pFlankingSize=None, pMaxDist=N
         nonzero_mask = count_matrix.data != 0
         mean_matrix.data[nonzero_mask] = sum_matrix.data[nonzero_mask] / count_matrix.data[nonzero_mask]
 
-    return mean_matrix
+    # return hic_diagonal_sharpen(mean_matrix)
+    return mean_matrix  
+
+
+def unsharp_mask_hic(matrix, sigma=1.0, strength=1.0):
+    """
+    Unsharp masking - good for TAD boundaries
+    """
+    if issparse(matrix):
+        matrix = matrix.toarray()
+    
+    blurred = ndimage.gaussian_filter(matrix, sigma=sigma)
+    sharpened = matrix + strength * (matrix - blurred)
+    
+    return np.clip(sharpened, 0, None)
+
+def sharpen_hic(matrix, strength=0.5):
+    """
+    Laplacian sharpening for dense 2D array
+    """
+    if issparse(matrix):
+        matrix = matrix.toarray()
+    
+    # Laplacian kernel
+    laplacian = np.array([
+        [0, -1, 0],
+        [-1, 4, -1],
+        [0, -1, 0]
+    ])
+    
+    edges = ndimage.convolve(matrix, laplacian)
+    sharpened = matrix + strength * edges
+    
+    # Ensure non-negative (Hi-C counts)
+    sharpened = np.clip(sharpened, 0, None)
+    
+    return sharpened
+
+def hic_diagonal_sharpen(matrix, strength=0.5, decay=0.3):
+    """
+    Stronger sharpening near diagonal (TADs), gentler for long-range
+    """
+    if issparse(matrix):
+        matrix = matrix.toarray()
+    
+    size = matrix.shape[0]
+    
+    # Distance-from-diagonal weight matrix
+    i, j = np.indices((size, size))
+    distance = np.abs(i - j)
+    weight = np.exp(-distance / (size * decay))
+    
+    # Laplacian edges
+    laplacian = np.array([
+        [0, -1, 0],
+        [-1, 4, -1],
+        [0, -1, 0]
+    ])
+    edges = ndimage.convolve(matrix, laplacian)
+    
+    # Weighted sharpening
+    sharpened = matrix + strength * weight * edges
+    
+    return np.clip(sharpened, 0, None)
 
 def writeCooler(pMatrixList, pBinSizeInt, pOutfile, pChromosomeList, pChromSizeList=None,  pMetadata=None):
     #takes a matrix as numpy array or sparse matrix and writes a cooler matrix from it
