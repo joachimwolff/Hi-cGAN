@@ -357,27 +357,68 @@ def main(args=None):
             print(msg)
             return
     
-    gpu = tf.config.list_physical_devices('GPU')
-    if gpu:
-        try:
-            for gpu_device in gpu:
-                tf.config.experimental.set_memory_growth(gpu_device, True)
-        except Exception as e:
-            print("Error: {}".format(e))
+    # gpu = tf.config.list_physical_devices('GPU')
+    # # if gpu:
+    # #     try:
+    # #         for gpu_device in gpu:
+    # #             tf.config.experimental.set_memory_growth(gpu_device, True)
+    # #     except Exception as e:
+    # #         print("Error: {}".format(e))
     
-    if args.multiGPUTraining:
-        strategy = tf.distribute.MirroredStrategy()
-    else:
-        log.info("Using single GPU training")
-        log.info("Available GPUs: {}".format(gpu))
-        log.info("Using GPU: {}".format(args.whichGPU-1))
+    # if args.multiGPUTraining:
+    #     strategy = tf.distribute.MirroredStrategy()
+    # else:
+    #     log.info("Using single GPU training")
+    #     log.info("Available GPUs: {}".format(gpu))
+    #     log.info("Using GPU: {}".format(args.whichGPU-1))
 
-        log.info("Using GPU: {}".format(gpu[args.whichGPU-1].name))
-        if args.whichGPU:
-            if args.whichGPU-1 >= len(gpu):
-                raise ValueError("Invalid GPU index: {}".format(args.whichGPU - 1))
-            # strategy = tf.distribute.OneDeviceStrategy(device=gpu[args.whichGPU].name)
-            strategy = tf.distribute.OneDeviceStrategy(device=f"/GPU:{args.whichGPU-1}")
+    #     log.info("Using GPU: {}".format(gpu[args.whichGPU-1].name))
+    #     if args.whichGPU:
+    #         if args.whichGPU-1 >= len(gpu):
+    #             raise ValueError("Invalid GPU index: {}".format(args.whichGPU - 1))
+    #         # strategy = tf.distribute.OneDeviceStrategy(device=gpu[args.whichGPU].name)
+    #         strategy = tf.distribute.OneDeviceStrategy(device=f"/GPU:{args.whichGPU-1}")
+
+    physical_gpus = tf.config.list_physical_devices('GPU')
+
+    try:
+        if args.multiGPUTraining:
+            # --- MULTI GPU SETUP ---
+            # Ensure all physical GPUs are visible
+            tf.config.set_visible_devices(physical_gpus, 'GPU')
+            
+            # Enable memory growth for all
+            for gpu_device in physical_gpus:
+                tf.config.experimental.set_memory_growth(gpu_device, True)
+                
+            strategy = tf.distribute.MirroredStrategy()
+            log.info(f"Using MirroredStrategy on {len(physical_gpus)} GPUs")
+
+        else:
+            # --- SINGLE GPU SETUP ---
+            log.info("Using single GPU training")
+            
+            # Validation
+            target_index = args.whichGPU - 1
+            if target_index < 0 or target_index >= len(physical_gpus):
+                raise ValueError(f"Invalid GPU index: {target_index}. Available: {len(physical_gpus)}")
+
+            # 1. HIDE other GPUs. Only make the selected structure visible to TF.
+            tf.config.set_visible_devices(physical_gpus[target_index], 'GPU')
+            
+            # 2. Set memory growth only on the visible device
+            tf.config.experimental.set_memory_growth(physical_gpus[target_index], True)
+
+            log.info("Physically selected GPU: {}".format(physical_gpus[target_index].name))
+
+            # 3. Define Strategy
+            # Note: Because we hid the other GPUs, TF sees this as the ONLY device.
+            # It is therefore logically indexed as "/GPU:0" regardless of physical ID.
+            strategy = tf.distribute.OneDeviceStrategy(device="/GPU:0")
+
+    except Exception as e:
+        print("Error during GPU setup: {}".format(e))
+        raise e
 
 
     with strategy.scope() as scope: 

@@ -58,11 +58,15 @@ def parse_arguments(args=None):
                         type=int,
                         default=20,
                         help="Number of batches to split predictions when --saveMemory is enabled")
+    parser.add_argument("--whichGPU", "-wgpu", required=False,
+                        type=int,
+                        default="",
+                        help="Specify which GPU to use for training in the single GPU case. E.g. 1, 2, etc.")
     parser.add_argument('--version', action='version',
                            version='%(prog)s {}'.format(__version__))
     return parser
 
-def prediction(pTrainedModel, pPredictionChromosomesFolders, pPredictionChromosomes, pOutputFolder, pMultiplier, pBinSize, pBatchSize, pWindowSize, pMatrixOutputName, pParameterOutputFile, pSaveMemory=False, pNumberOfBatches=20):
+def prediction(pTrainedModel, pPredictionChromosomesFolders, pPredictionChromosomes, pOutputFolder, pMultiplier, pBinSize, pBatchSize, pWindowSize, pMatrixOutputName, pParameterOutputFile, pSaveMemory=False, pNumberOfBatches=20, pScope=None):
     trainedmodel = pTrainedModel
     predictionChromosomesFolders = pPredictionChromosomesFolders
     predictionChromosomes = pPredictionChromosomes
@@ -119,7 +123,7 @@ def prediction(pTrainedModel, pPredictionChromosomesFolders, pPredictionChromoso
     for container in testdataContainerList:
         container.unloadData() 
 
-    trained_GAN = hicGAN.HiCGAN(log_dir=outputFolder, number_factors=nr_factors)
+    trained_GAN = hicGAN.HiCGAN(log_dir=outputFolder, number_factors=nr_factors, scope=pScope)
     trained_GAN.loadGenerator(trainedModelPath=trainedmodel)
     predList = []
     for record, container, nr_samples in zip(tfRecordFilenames, testdataContainerList, sampleSizeList):
@@ -184,6 +188,32 @@ def prediction(pTrainedModel, pPredictionChromosomesFolders, pPredictionChromoso
 def main(args=None):
     args = parse_arguments().parse_args(args)
     # print(args)
+    # 1. Get all physical GPUs
+    physical_gpus = tf.config.list_physical_devices('GPU')
+
+    if physical_gpus:
+        try:
+            # Calculate index (assuming args.whichGPU is 1-based data like 1, 2, 3...)
+            index = args.whichGPU - 1
+            if index < 0 or index >= len(physical_gpus):
+                raise ValueError(f"Invalid GPU index: {index}. Available: {len(physical_gpus)}")
+
+            # 2. Key Step: Make ONLY the selected GPU visible to TensorFlow
+            # This prevents TF from touching the memory of the other GPU.
+            tf.config.set_visible_devices(physical_gpus[index], 'GPU')
+
+            # 3. Set memory growth only on the visible device
+            # Note: After setting visibility, we interact with the specific physical object
+            tf.config.experimental.set_memory_growth(physical_gpus[index], True)
+
+            log.info(f"Physically selected GPU: {physical_gpus[index].name}")
+            log.info("Other GPUs are now invisible to TensorFlow.")
+
+        except Exception as e:
+            print("Error setting up GPU: {}".format(e))
+    else:
+        log.info("No GPUs found. Running on CPU.")
+        
     prediction(pTrainedModel=args.trainedModel,
         pPredictionChromosomesFolders=args.predictionChromosomesFolders,
         pPredictionChromosomes=args.predictionChromosomes,
@@ -195,4 +225,5 @@ def main(args=None):
         pMatrixOutputName=args.matrixOutputName,
         pParameterOutputFile=args.parameterOutputFile,
         pSaveMemory=args.saveMemory,
-        pNumberOfBatches=args.numberOfBatches)
+        pNumberOfBatches=args.numberOfBatches,
+        pScope=None)
