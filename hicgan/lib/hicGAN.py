@@ -8,6 +8,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt 
 from tqdm import tqdm
 from . import utils
+import re
 
 #implementation of adapted pix2pix cGAN
 #modified from tensorflow tutorial https://www.tensorflow.org/tutorials/generative/pix
@@ -29,7 +30,8 @@ class HiCGAN():
                     learning_rate_discriminator: float = 1e-6,
                     adam_beta_1: float = 0.5,
                     pretrained_model_path: str = "",
-                    scope=None): 
+                    scope=None,
+                    restore_checkpoint: bool = False): 
         super().__init__()
 
         self.OUTPUT_CHANNELS = 1
@@ -59,6 +61,26 @@ class HiCGAN():
                                     discriminator_optimizer=self.discriminator_optimizer,
                                     generator=self.generator,
                                     discriminator=self.discriminator)
+        self.start_epoch = 0
+        if restore_checkpoint:
+            latest_checkpoint = tf.train.latest_checkpoint(self.checkpoint_dir)
+            if latest_checkpoint:
+                print(f"Restoring from checkpoint: {latest_checkpoint}")
+                self.checkpoint.restore(latest_checkpoint)
+                basename = os.path.basename(latest_checkpoint)
+                m = re.search(r'ckpt-(\d+)$', basename)
+                if m:
+                    ckpt_num = int(m.group(1))
+                else:
+                    try:
+                        ckpt_num = int(basename.split('-')[-1])
+                    except Exception:
+                        ckpt_num = 0
+                # self.__epoch_counter = ckpt_num
+                self.start_epoch = ckpt_num
+                print(f"Resuming from checkpoint #{ckpt_num}.")
+            else:
+                print("No checkpoint found. Starting from scratch.")
         self.plot_type = plot_type
         if self.plot_type not in ["png", "pdf", "svg"]:
             self.plot_type = "png"
@@ -340,8 +362,14 @@ class HiCGAN():
 
     def fit(self, train_ds, epochs, test_ds, steps_per_epoch: int):
         distributed_dataset = self.scope.experimental_distribute_dataset(train_ds)
+        
+        if self.start_epoch > 0 and self.start_epoch < epochs:
+            print(f"Resuming training from epoch {self.start_epoch}.")
+        elif self.start_epoch >= epochs:
+            print(f"Checkpoint epoch {self.start_epoch} is greater than or equal to total epochs {epochs}. Starting from scratch.")
+            exit(1)
 
-        for epoch in range(epochs):
+        for epoch in range(self.start_epoch, epochs):
             #generate sample output
             if epoch % self.example_plot_frequency == 0:
                 for example_input, example_target in test_ds.take(1):
@@ -408,7 +436,7 @@ class HiCGAN():
                 self.discriminator.save(filepath=os.path.join(self.log_dir, "discriminator_{:05d}.keras".format(epoch)), save_format="keras")
 
 
-        self.checkpoint.save(file_prefix = self.checkpoint_prefix)
+            self.checkpoint.save(file_prefix = self.checkpoint_prefix)
         utils.plotLoss(pGeneratorLossValueLists=[self.__gen_train_loss_epochs, self.__gen_val_loss_epochs],
                               pDiscLossValueLists=[ [self.loss_weight_discriminator*sum(x) for x in zip(self.__disc_train_loss_fake_epochs, self.__disc_train_loss_true_epochs)],
                                                     self.__disc_train_loss_true_epochs, 

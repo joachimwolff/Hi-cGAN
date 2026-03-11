@@ -124,6 +124,12 @@ def parse_arguments(args=None):
                         type=int,
                         default=4,
                         help="Number of threads to use for TFRecord writing.")
+    parser.add_argument("--resume", "-r", required=False, action='store_true',
+                        help="If set, attempt to resume training by loading the latest checkpoint from the output folder.")
+    parser.add_argument("--keepTFRecords", "-k", required=False,
+                        action='store_true',
+                        default=False,
+                        help="Do not delete TFRecord files after training.")
     parser.add_argument('--version', action='version',
                            version='%(prog)s {}'.format(__version__))
 
@@ -271,7 +277,8 @@ def training(pTfRecordFilenames,
              pRecordSize,
              pStoredFeaturesDict,
              pNumberSamplesList,
-             pNumberOfFactors
+             pNumberOfFactors,
+             pResume=False
              ):
 
         traindataRecords = [item for sublist in pTfRecordFilenames[0:pLengthTrainDataContainerList] for item in sublist]
@@ -335,7 +342,8 @@ def training(pTfRecordFilenames,
                                         adam_beta_1=pBeta1,
                                         plot_type=pFigureFileFormat,
                                         plot_frequency=pPlotFrequency,
-                                        scope=pScope)
+                                        scope=pScope,
+                                        restore_checkpoint=pResume)
         
         hicGanModel.plotModels(pOutputPath=pOutputFolder, pFigureFileFormat=pFigureFileFormat)
 
@@ -504,7 +512,8 @@ def main(args=None):
                 pRecordSize=args.recordSize,
                 pStoredFeaturesDict=storedFeatures,
                 pNumberSamplesList=nr_samples_list,
-                pNumberOfFactors=nr_factors
+                pNumberOfFactors=nr_factors,
+                pResume=args.resume
             )
-        if (args.trainOnly and not args.createDataOnly) or (not args.createDataOnly and not args.trainOnly):
+        if not args.keepTFRecords and ((args.trainOnly and not args.createDataOnly) or (not args.createDataOnly and not args.trainOnly)):
             delete_model_files(pTFRecordFiles=tfRecordFilenames)
