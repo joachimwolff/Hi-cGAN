@@ -15,6 +15,7 @@ from .lib import records
 from hicgan._version import __version__
 
 import logging
+import pickle
 log = logging.getLogger(__name__)
 
 
@@ -111,6 +112,14 @@ def parse_arguments(args=None):
     parser.add_argument("--saveMemory", "-sm", required=False,
                         action='store_true',
                         help="Save memory by not loading all data into memory at once.")
+    parser.add_argument("--createDataOnly", "-cdo", required=False,
+                        action='store_true',
+                        default=False,
+                        help="Only create TFRecords and exit (do not run training).")
+    parser.add_argument("--trainOnly", "-to", required=False,
+                        action='store_true',
+                        default=False,
+                        help="Only run training using existing TFRecords (do not create TFRecords).")
     parser.add_argument("--threads", "-t", required=False,
                         type=int,
                         default=4,
@@ -347,6 +356,12 @@ def delete_model_files(pTFRecordFiles):
 def main(args=None):
     args = parse_arguments().parse_args(args)
     print("foo test 1234")
+
+    # Reject mutually exclusive flags: both cannot be true at the same time
+    if args.createDataOnly and args.trainOnly:
+        print("Exiting. Flags --createDataOnly and --trainOnly are mutually exclusive; choose only one or neither.")
+        return
+
     for matrix in args.trainingMatrices + args.validationMatrices:
         if not os.path.exists(matrix):
             msg = "Exiting. Matrix file not found: {:s}".format(matrix)
@@ -378,87 +393,118 @@ def main(args=None):
     #             raise ValueError("Invalid GPU index: {}".format(args.whichGPU - 1))
     #         # strategy = tf.distribute.OneDeviceStrategy(device=gpu[args.whichGPU].name)
     #         strategy = tf.distribute.OneDeviceStrategy(device=f"/GPU:{args.whichGPU-1}")
+    if (args.trainOnly and not args.createDataOnly) or (not args.createDataOnly and not args.trainOnly):
+        physical_gpus = tf.config.list_physical_devices('GPU')
 
-    physical_gpus = tf.config.list_physical_devices('GPU')
-
-    try:
-        if args.multiGPUTraining:
-            # --- MULTI GPU SETUP ---
-            # Ensure all physical GPUs are visible
-            tf.config.set_visible_devices(physical_gpus, 'GPU')
-            
-            # Enable memory growth for all
-            for gpu_device in physical_gpus:
-                tf.config.experimental.set_memory_growth(gpu_device, True)
+        try:
+            if args.multiGPUTraining:
+                # --- MULTI GPU SETUP ---
+                # Ensure all physical GPUs are visible
+                tf.config.set_visible_devices(physical_gpus, 'GPU')
                 
-            strategy = tf.distribute.MirroredStrategy()
-            log.info(f"Using MirroredStrategy on {len(physical_gpus)} GPUs")
+                # Enable memory growth for all
+                for gpu_device in physical_gpus:
+                    tf.config.experimental.set_memory_growth(gpu_device, True)
+                    
+                strategy = tf.distribute.MirroredStrategy()
+                log.info(f"Using MirroredStrategy on {len(physical_gpus)} GPUs")
 
-        else:
-            # --- SINGLE GPU SETUP ---
-            log.info("Using single GPU training")
-            
-            # Validation
-            target_index = args.whichGPU - 1
-            if target_index < 0 or target_index >= len(physical_gpus):
-                raise ValueError(f"Invalid GPU index: {target_index}. Available: {len(physical_gpus)}")
+            else:
+                # --- SINGLE GPU SETUP ---
+                log.info("Using single GPU training")
+                
+                # Validation
+                target_index = args.whichGPU - 1
+                if target_index < 0 or target_index >= len(physical_gpus):
+                    raise ValueError(f"Invalid GPU index: {target_index}. Available: {len(physical_gpus)}")
 
-            # 1. HIDE other GPUs. Only make the selected structure visible to TF.
-            tf.config.set_visible_devices(physical_gpus[target_index], 'GPU')
-            
-            # 2. Set memory growth only on the visible device
-            tf.config.experimental.set_memory_growth(physical_gpus[target_index], True)
+                # 1. HIDE other GPUs. Only make the selected structure visible to TF.
+                tf.config.set_visible_devices(physical_gpus[target_index], 'GPU')
+                
+                # 2. Set memory growth only on the visible device
+                tf.config.experimental.set_memory_growth(physical_gpus[target_index], True)
 
-            log.info("Physically selected GPU: {}".format(physical_gpus[target_index].name))
+                log.info("Physically selected GPU: {}".format(physical_gpus[target_index].name))
 
-            # 3. Define Strategy
-            # Note: Because we hid the other GPUs, TF sees this as the ONLY device.
-            # It is therefore logically indexed as "/GPU:0" regardless of physical ID.
-            strategy = tf.distribute.OneDeviceStrategy(device="/GPU:0")
+                # 3. Define Strategy
+                # Note: Because we hid the other GPUs, TF sees this as the ONLY device.
+                # It is therefore logically indexed as "/GPU:0" regardless of physical ID.
+                strategy = tf.distribute.OneDeviceStrategy(device="/GPU:0")
 
-    except Exception as e:
-        print("Error during GPU setup: {}".format(e))
-        raise e
+        except Exception as e:
+            print("Error during GPU setup: {}".format(e))
+            raise e
+    if (args.createDataOnly and not args.trainOnly) or (not args.createDataOnly and not args.trainOnly):
+        strategy = tf.distribute.OneDeviceStrategy(device="/CPU:0")
 
 
     with strategy.scope() as scope: 
-        tfRecordFilenames, traindataContainerListLength, nr_samples_list, storedFeatures, nr_factors = create_data(args.trainingMatrices, 
-                    args.trainingChromosomes, 
-                    args.trainingChromatinFolders, 
-                    args.validationMatrices, 
-                    args.validationChromosomes, 
-                    args.validationChromatinFolders,
-                    args.windowSize,
-                    args.outputFolder,
-                    args.batchSize,
-                    args.flipSamples,
-                    args.figureFileFormat,
-                    args.recordSize,
-                    args.noScaleNorm,
-                    args.saveMemory,
-                    args.threads)
-        training(
-            pTfRecordFilenames=tfRecordFilenames,
-            pLengthTrainDataContainerList=traindataContainerListLength,
-            pWindowSize=args.windowSize,
-            pOutputFolder=args.outputFolder,
-            pEpochs=args.epochs,
-            pLossWeightPixel=args.lossWeightPixel,
-            pLossWeightDiscriminator=args.lossWeightDiscriminator,
-            pLossWeightAdversarial=args.lossWeightAdversarial,
-            pLossTypePixel=args.lossTypePixel,
-            pLossWeightTV=args.lossWeightTV,
-            pLearningRateGenerator=args.learningRateGenerator,
-            pLearningRateDiscriminator=args.learningRateDiscriminator,
-            pBeta1=args.beta1,
-            pFigureFileFormat=args.figureFileFormat,
-            pPlotFrequency=args.plotFrequency,
-            pFlipSamples=args.flipSamples,
-            pScope=scope,
-            pBatchSize=args.batchSize,
-            pRecordSize=args.recordSize,
-            pStoredFeaturesDict=storedFeatures,
-            pNumberSamplesList=nr_samples_list,
-            pNumberOfFactors=nr_factors
-        )
-        delete_model_files(pTFRecordFiles=tfRecordFilenames)
+
+        if (not args.trainOnly and args.createDataOnly) or (not args.createDataOnly and not args.trainOnly):
+            tfRecordFilenames, traindataContainerListLength, nr_samples_list, storedFeatures, nr_factors = create_data(args.trainingMatrices, 
+                        args.trainingChromosomes, 
+                        args.trainingChromatinFolders, 
+                        args.validationMatrices, 
+                        args.validationChromosomes, 
+                        args.validationChromatinFolders,
+                        args.windowSize,
+                        args.outputFolder,
+                        args.batchSize,
+                        args.flipSamples,
+                        args.figureFileFormat,
+                        args.recordSize,
+                        args.noScaleNorm,
+                        args.saveMemory,
+                        args.threads)
+            if args.createDataOnly:
+                meta = {
+                    "tfRecordFilenames": tfRecordFilenames,
+                    "traindataContainerListLength": traindataContainerListLength,
+                    "nr_samples_list": nr_samples_list,
+                    "storedFeatures": storedFeatures,
+                    "nr_factors": nr_factors,
+                    "created_at": datetime.utcnow().isoformat()
+                }
+                outfile = os.path.join(args.outputFolder, "hicgan_metadata.pkl")
+                with open(outfile, "wb") as f:
+                    pickle.dump(meta, f, protocol=pickle.HIGHEST_PROTOCOL)
+                print(f"Saved metadata to {outfile}")
+        if (args.trainOnly and not args.createDataOnly) or (not args.createDataOnly and not args.trainOnly):
+            if args.trainOnly:
+                meta_file = os.path.join(args.outputFolder, "hicgan_metadata.pkl")
+                if not os.path.exists(meta_file):
+                    print(f"Metadata file not found: {meta_file}. Cannot proceed with training.")
+                    return
+                with open(meta_file, "rb") as f:
+                    meta = pickle.load(f)
+                tfRecordFilenames = meta["tfRecordFilenames"]
+                traindataContainerListLength = meta["traindataContainerListLength"]
+                nr_samples_list = meta["nr_samples_list"]
+                storedFeatures = meta["storedFeatures"]
+                nr_factors = meta["nr_factors"]
+            training(
+                pTfRecordFilenames=tfRecordFilenames,
+                pLengthTrainDataContainerList=traindataContainerListLength,
+                pWindowSize=args.windowSize,
+                pOutputFolder=args.outputFolder,
+                pEpochs=args.epochs,
+                pLossWeightPixel=args.lossWeightPixel,
+                pLossWeightDiscriminator=args.lossWeightDiscriminator,
+                pLossWeightAdversarial=args.lossWeightAdversarial,
+                pLossTypePixel=args.lossTypePixel,
+                pLossWeightTV=args.lossWeightTV,
+                pLearningRateGenerator=args.learningRateGenerator,
+                pLearningRateDiscriminator=args.learningRateDiscriminator,
+                pBeta1=args.beta1,
+                pFigureFileFormat=args.figureFileFormat,
+                pPlotFrequency=args.plotFrequency,
+                pFlipSamples=args.flipSamples,
+                pScope=scope,
+                pBatchSize=args.batchSize,
+                pRecordSize=args.recordSize,
+                pStoredFeaturesDict=storedFeatures,
+                pNumberSamplesList=nr_samples_list,
+                pNumberOfFactors=nr_factors
+            )
+        if (args.trainOnly and not args.createDataOnly) or (not args.createDataOnly and not args.trainOnly):
+            delete_model_files(pTFRecordFiles=tfRecordFilenames)
