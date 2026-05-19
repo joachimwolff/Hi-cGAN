@@ -538,6 +538,15 @@ def writeCooler(pMatrixList, pBinSizeInt, pOutfile, pChromosomeList, pChromSizeL
     #         })
     #         pixels_tmp.sort_values(by=['bin1_id','bin2_id'], inplace=True)
     #         yield pixels_tmp
+    def _load_matrix_entry(matrix_entry):
+        if isinstance(matrix_entry, str):
+            if matrix_entry.endswith(".npz"):
+                return sparse.load_npz(matrix_entry)
+            if matrix_entry.endswith(".npy"):
+                return np.load(matrix_entry)
+            raise ValueError(f"Unsupported matrix file format: {matrix_entry}")
+        return matrix_entry
+
     def pixelGenerator(pMatrixList, pOffsetList, sort_pixels=False, dtype=np.float32):
         """
         Memory-efficient generator that yields pixel DataFrames from sparse Hi-C matrices.
@@ -559,7 +568,8 @@ def writeCooler(pMatrixList, pBinSizeInt, pOutfile, pChromosomeList, pChromSizeL
         pandas.DataFrame
             Columns: ['bin1_id', 'bin2_id', 'count']
         """
-        for matrix, offset in zip(pMatrixList, pOffsetList):
+        for matrix_entry, offset in zip(pMatrixList, pOffsetList):
+            matrix = _load_matrix_entry(matrix_entry)
             log.debug(f"Generating pixels for matrix with offset {offset}")
 
             # Ensure matrix is sparse in COO format
@@ -589,6 +599,7 @@ def writeCooler(pMatrixList, pBinSizeInt, pOutfile, pChromosomeList, pChromSizeL
                 pixels_tmp.sort_values(['bin1_id', 'bin2_id'], inplace=True, ignore_index=True)
 
             yield pixels_tmp
+            del matrix
 
         # log.info("Sorting pixel DataFrame if requested")
         # if sort_pixels and len(pixels_tmp) > 1:
@@ -613,7 +624,8 @@ def writeCooler(pMatrixList, pBinSizeInt, pOutfile, pChromosomeList, pChromSizeL
         return
     bins = pd.DataFrame(columns=['chrom','start','end'])
     offsetList = [0]
-    for i, (matrix, chrom) in enumerate(zip(pMatrixList,pChromosomeList)):
+    for i, (matrix_entry, chrom) in enumerate(zip(pMatrixList,pChromosomeList)):
+        matrix = _load_matrix_entry(matrix_entry)
         log.info(f"Processing chromosome {chrom} ({i+1}/{len(pChromosomeList)})")
         #the chromosome size may not be integer-divisible by the bin size
         #so specifying the real chrom size is possible, but the
@@ -636,6 +648,7 @@ def writeCooler(pMatrixList, pBinSizeInt, pOutfile, pChromosomeList, pChromSizeL
         bins = pd.concat([bins, bins_tmp], ignore_index=True)
         # bins = bins.append(bins_tmp, ignore_index=True)
         offsetList.append(offsetList[-1] + bins_tmp.shape[0])
+        del matrix
 
     #correct dtypes for joint dataframe
     bins["start"] = bins["start"].astype("uint32")

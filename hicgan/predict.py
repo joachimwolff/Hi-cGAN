@@ -3,6 +3,7 @@ import numpy as np
 import os
 import csv
 import tensorflow as tf
+from scipy import sparse
 from .lib import dataContainer
 from .lib import records
 from .lib import hicGAN
@@ -133,6 +134,12 @@ def prediction(pTrainedModel, pPredictionChromosomesFolders, pPredictionChromoso
     flankingsize = windowSize
 
     paramDict = locals().copy()
+    predictionChunksDir = os.path.join(outputFolder, "prediction_chunks")
+    matrixChunksDir = os.path.join(outputFolder, "matrix_chunks")
+    if not os.path.exists(predictionChunksDir):
+        os.makedirs(predictionChunksDir)
+    if not os.path.exists(matrixChunksDir):
+        os.makedirs(matrixChunksDir)
         
     chromNameList = sorted([x.lstrip("chr") for x in predictionChromosomes])
 
@@ -180,8 +187,8 @@ def prediction(pTrainedModel, pPredictionChromosomesFolders, pPredictionChromoso
     if pMode in ["predict", "all"]:
         trained_GAN = hicGAN.HiCGAN(log_dir=outputFolder, number_factors=nr_factors, scope=pScope)
         trained_GAN.loadGenerator(trainedModelPath=trainedmodel)
-        predList = []
-        for record, container, nr_samples in zip(tfRecordFilenames, testdataContainerList, sampleSizeList):
+        predictionFiles = []
+        for chrom, record, container, nr_samples in zip(chromNameList, tfRecordFilenames, testdataContainerList, sampleSizeList):
             storedFeaturesDict = container.storedFeatures
             testDs = tf.data.TFRecordDataset(record, 
                                                 num_parallel_reads=None,
@@ -192,28 +199,30 @@ def prediction(pTrainedModel, pPredictionChromosomesFolders, pPredictionChromoso
 
             # Predict in batches to manage memory usage
             predBatches = []
+            triu_indices = np.triu_indices(windowSize)
             if pSaveMemory:
                 total_batches = pNumberOfBatches  # You can adjust this to 5 or more
-                batch_size = nr_samples // total_batches
+                batch_size = max(1, nr_samples // max(1, total_batches))
                 log.debug("Predicting on dataset in %d batches to save memory..." % total_batches)
                 for batch_idx in range(0, nr_samples, batch_size):
                     batch_pred = trained_GAN.predict(test_ds=testDs.skip(batch_idx).take(batch_size), steps_per_record=1)
-                    triu_indices = np.triu_indices(windowSize)
                     batch_pred_array = np.array([np.array(x[triu_indices], dtype=np.float16) for x in batch_pred], dtype=np.float16)
                     predBatches.append(batch_pred_array)
+                
                 predArray = np.concatenate(predBatches, axis=0).astype(np.float16)
                 del predBatches
-                predList.append(predArray)
-                del predArray
             else:
                 log.debug("Predicting on full dataset...")
                 predDs = trained_GAN.predict(test_ds=testDs, steps_per_record=1)
                 log.debug("Converting predictions to numpy arrays...")
-                triu_indices = np.triu_indices(windowSize)
-                predArray = np.array([np.array(x[triu_indices]) for x in predDs])
-                predList.append(predArray)
+                predArray = np.array([np.array(x[triu_indices], dtype=np.float16) for x in predDs], dtype=np.float16)
                 del predDs
-                del predArray
+
+            predFile = os.path.join(predictionChunksDir, f"pred_chr{chrom}.npy")
+            np.save(predFile, predArray, allow_pickle=False)
+            predictionFiles.append(predFile)
+            log.info("Wrote predictions for chr%s to %s", chrom, predFile)
+            del predArray
         log.debug("Prediction on all chromosomes completed.")
 
         log.info("Cleaning up temporary files...")
@@ -222,8 +231,9 @@ def prediction(pTrainedModel, pPredictionChromosomesFolders, pPredictionChromoso
                 os.remove(tfrecordfile)
         if pMode == "predict":
             save_vars = {
-                "predList": predList,
+                "predictionFiles": predictionFiles,
                 "chromNameList": chromNameList,
+                "windowSize": windowSize,
             }
 
             pickle_path = os.path.join(outputFolder, "predictions.pkl")
@@ -241,18 +251,57 @@ def prediction(pTrainedModel, pPredictionChromosomesFolders, pPredictionChromoso
         with open(pickle_path, "rb") as fh:
             loaded_vars = pickle.load(fh)
 
-        predList = loaded_vars["predList"]
+        predictionFiles = loaded_vars.get("predictionFiles")
         chromNameList = loaded_vars["chromNameList"]
+        if "windowSize" in loaded_vars:
+            windowSize = int(loaded_vars["windowSize"])
+
+        # Backward compatibility: older pickles stored all predictions in-memory.
+        if predictionFiles is None and "predList" in loaded_vars:
+            predictionFiles = []
+            for chrom, predArray in zip(chromNameList, loaded_vars["predList"]):
+                predFile = os.path.join(predictionChunksDir, f"pred_chr{chrom}.npy")
+                np.save(predFile, np.asarray(predArray, dtype=np.float16), allow_pickle=False)
+                predictionFiles.append(predFile)
+            log.info("Converted legacy in-memory predictions to disk-backed chunks in %s", predictionChunksDir)
 
     if pMode in ["make-matrix", "all"]:
-        log.debug("Rebuilding full matrices from predicted triangles...")
-        predList = [utils.rebuildMatrix(pArrayOfTriangles=x, pWindowSize=windowSize, pFlankingSize=windowSize, pSaveMemory=pSaveMemory) for x in predList]
-        log.debug("Scaling predicted matrices...")
-        predList = [utils.scaleArray(x) * multiplier for x in predList]
+        if pMode == "all":
+            # In all-mode the prediction step produced the chunk file list.
+            if "predictionFiles" not in locals():
+                predictionFiles = []
+                for chrom in chromNameList:
+                    predFile = os.path.join(predictionChunksDir, f"pred_chr{chrom}.npy")
+                    if os.path.exists(predFile):
+                        predictionFiles.append(predFile)
+
+        if not predictionFiles:
+            log.error("No prediction chunk files found in %s", predictionChunksDir)
+            return
+
+        log.debug("Rebuilding full matrices from predicted triangles one chromosome at a time...")
+        matrixFiles = []
+        for chrom, predFile in zip(chromNameList, predictionFiles):
+            log.info("Loading prediction chunk for chr%s from %s", chrom, predFile)
+            predTriangles = np.load(predFile, mmap_mode="r")
+            predMatrix = utils.rebuildMatrix(pArrayOfTriangles=predTriangles, pWindowSize=windowSize, pFlankingSize=windowSize, pSaveMemory=pSaveMemory)
+            predMatrix = utils.scaleArray(predMatrix) * multiplier
+
+            matrixFile = os.path.join(matrixChunksDir, f"matrix_chr{chrom}.npz")
+            if sparse.isspmatrix(predMatrix):
+                sparse.save_npz(matrixFile, predMatrix.tocsr())
+            else:
+                sparse.save_npz(matrixFile, sparse.csr_matrix(predMatrix))
+            matrixFiles.append(matrixFile)
+            log.info("Wrote scaled matrix for chr%s to %s", chrom, matrixFile)
+
+            del predTriangles
+            del predMatrix
+
         matrixname = os.path.join(outputFolder, pMatrixOutputName)
         log.info("Writing predicted matrix to disk on %s..." % matrixname)   
 
-        utils.writeCooler(pMatrixList=predList, 
+        utils.writeCooler(pMatrixList=matrixFiles, 
                       pBinSizeInt=binSize, 
                       pOutfile=matrixname, 
                       pChromosomeList=chromNameList)
