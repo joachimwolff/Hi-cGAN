@@ -64,6 +64,7 @@ class HiCGAN():
         self.start_epoch = 0
         if restore_checkpoint:
             latest_checkpoint = tf.train.latest_checkpoint(self.checkpoint_dir)
+            print(f"Current checkpoint directory: {self.checkpoint_dir}")
             if latest_checkpoint:
                 print(f"Restoring from checkpoint: {latest_checkpoint}")
                 self.checkpoint.restore(latest_checkpoint)
