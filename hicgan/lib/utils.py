@@ -315,45 +315,70 @@ def rebuildMatrix(pArrayOfTriangles, pWindowSize, pFlankingSize=None, pMaxDist=N
 
     
     if pSaveMemory:
-        sum_matrix = sparse.lil_matrix((matrix_size, matrix_size), dtype=np.float32)
-        count_matrix = sparse.lil_matrix((matrix_size, matrix_size), dtype=np.int32)
+        # Memory-bounded, vectorized rebuild.
+        # Instead of per-element lil_matrix assignment (slow: billions of
+        # Python-level ops for high-res chromosomes), accumulate the triangles
+        # into COO blocks and fold each block into running CSR sum/count
+        # matrices. COO->CSR sums duplicate (row, col) entries in C, and CSR
+        # addition is C-level too. Peak RAM is the final banded matrix plus a
+        # single block of indices, so high-resolution matrices stay well within
+        # the available RAM while being orders of magnitude faster than lil.
+        if pMaxDist is None or pMaxDist == pWindowSize:
+            r, c = np.triu_indices(pWindowSize)
+        else:
+            r, c = np.mask_indices(pWindowSize, maskFunc, pMaxDist)
+        r = r.astype(np.int64)
+        c = c.astype(np.int64)
+        entriesPerWindow = max(1, r.size)
 
+        # Cap each COO block at ~5e7 entries to bound temporary memory.
+        targetEntriesPerBlock = 50_000_000
+        windowsPerBlock = max(1, int(targetEntriesPerBlock // entriesPerWindow))
+        log.info("Rebuilding in blocks of %d windows (%d entries/window)", windowsPerBlock, entriesPerWindow)
+
+        sum_matrix = sparse.csr_matrix((matrix_size, matrix_size), dtype=np.float32)
+        count_matrix = sparse.csr_matrix((matrix_size, matrix_size), dtype=np.float32)
+
+        bufRows, bufCols, bufVals = [], [], []
+
+        def _flush(pSum, pCount):
+            if not bufRows:
+                return pSum, pCount
+            rr = np.concatenate(bufRows)
+            cc = np.concatenate(bufCols)
+            vv = np.concatenate(bufVals)
+            block_sum = sparse.coo_matrix((vv, (rr, cc)),
+                                          shape=(matrix_size, matrix_size),
+                                          dtype=np.float32).tocsr()
+            block_cnt = sparse.coo_matrix((np.ones(vv.shape[0], dtype=np.float32), (rr, cc)),
+                                          shape=(matrix_size, matrix_size),
+                                          dtype=np.float32).tocsr()
+            pSum = pSum + block_sum
+            pCount = pCount + block_cnt
+            bufRows.clear()
+            bufCols.clear()
+            bufVals.clear()
+            return pSum, pCount
+
+        windowsInBuf = 0
         for i in tqdm(range(0, nr_matrices, stepsize), desc="rebuilding matrix"):
             j = i + flankingSize
-            k = j + pWindowSize
-
-            if pMaxDist is None or pMaxDist == pWindowSize:
-                r, c = np.triu_indices(pWindowSize)
-            else:
-                r, c = np.mask_indices(pWindowSize, maskFunc, pMaxDist)
-
-            rows = r + j
-            cols = c + j
             tri = pArrayOfTriangles[i]
-
             vals = tri if tri.ndim == 1 else tri[r, c]
-            sum_matrix[rows, cols] += vals
+            bufRows.append(r + j)
+            bufCols.append(c + j)
+            bufVals.append(np.asarray(vals, dtype=np.float32))
+            windowsInBuf += 1
+            if windowsInBuf >= windowsPerBlock:
+                sum_matrix, count_matrix = _flush(sum_matrix, count_matrix)
+                windowsInBuf = 0
+        sum_matrix, count_matrix = _flush(sum_matrix, count_matrix)
 
-            vals_count = np.ones_like(rows, dtype=np.int32)
-            count_matrix[rows, cols] += vals_count
-
-
-        sum_matrix = sum_matrix.tocsr()
+        # mean = sum / count on covered cells (count > 0 wherever sum has an entry)
         count_matrix = count_matrix.tocsr()
-
-        # Avoid division by zero
-        count_matrix.data = count_matrix.data.astype(np.float32)
-        nonzero_mask = count_matrix.data != 0
-        count_matrix.data[~nonzero_mask] = 1.0  # prevent div/0, will be masked later
-
-        # Compute mean only where count > 0
-        count_matrix = count_matrix.astype(np.float32).tocsr()
         inv_count = count_matrix.copy()
-        inv_count.data = 1.0 / inv_count.data  # invert only the nonzeros
-
-        # Multiply elementwise
-        mean_matrix = sum_matrix.multiply(inv_count)
-        # mean_matrix.eliminate_zeros()
+        inv_count.data = 1.0 / inv_count.data
+        mean_matrix = sum_matrix.multiply(inv_count).tocsr()
         mean_matrix.eliminate_zeros()
     else:
         rows_all, cols_all, vals_all = [], [], []
