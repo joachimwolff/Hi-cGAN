@@ -96,23 +96,48 @@ def createDataContainer(pChromNameList, pOutputFolder, pChromatinFolder, pBinSiz
         msg = "Exiting. No data found"
         print(msg)
         return
-    container0 = testdataContainerList[0]
-    nr_factors = container0.nr_factors
+    # A sliding window spans windowSize + 2*flankingSize bins. At a coarse
+    # binSize a chromosome may have fewer bins than that and would otherwise
+    # crash deep inside getNumberSamples. Skip such chromosomes with a clear
+    # warning instead of aborting the whole prediction run, so that
+    # resolution-independent prediction works for whichever chromosomes fit.
+    required_bins = windowSize + 2 * flankingsize
+    container0 = None
+    keptContainers = []
     tfRecordFilenames = []
     sampleSizeList = []
     for container in testdataContainerList:
         container.loadData(**loadParams)
+        if not container.hasEnoughBins():
+            nr_bins = container.FactorDataArray.shape[0] if container.FactorDataArray is not None else 0
+            msg = ("Skipping chr{:s}: {:d} bins at binSize {:s} < required {:d} "
+                   "(windowSize {:d} + 2x flanking). Use a finer binSize to include it.").format(
+                       str(container.chromosome), nr_bins, str(pBinSize), required_bins, windowSize)
+            print(msg)
+            log.warning(msg)
+            container.unloadData()
+            continue
+        if container0 is None:
+            container0 = container
         if not container0.checkCompatibility(container):
             msg = "Aborting. Incompatible data"
             raise SystemExit(msg)
         tfRecordFilenames.append(container.writeTFRecord(pOutputFolder=pOutputFolder,
                                                         pRecordSize=None)[0])
         sampleSizeList.append(int(np.ceil(container.getNumberSamples() / batchSize)))
-    
+        keptContainers.append(container)
+
+    if container0 is None:
+        msg = ("Exiting. No requested chromosome has enough bins at binSize {:s} for windowSize {:d} "
+               "(need >= {:d} bins). Predict at a finer binSize (smaller -b).").format(
+                   str(pBinSize), windowSize, required_bins)
+        print(msg)
+        raise SystemExit(msg)
+
     nr_factors = container0.nr_factors
-    for container in testdataContainerList:
-        container.unloadData() 
-    return testdataContainerList, tfRecordFilenames, sampleSizeList, nr_factors
+    for container in keptContainers:
+        container.unloadData()
+    return keptContainers, tfRecordFilenames, sampleSizeList, nr_factors
 
 def prediction(pTrainedModel, pPredictionChromosomesFolders, pPredictionChromosomes, pOutputFolder, pMultiplier, pBinSize, pBatchSize, pWindowSize, pMatrixOutputName, pParameterOutputFile, pSaveMemory=False, pNumberOfBatches=20, pScope=None, pMode="all"):
     trainedmodel = pTrainedModel
@@ -188,42 +213,48 @@ def prediction(pTrainedModel, pPredictionChromosomesFolders, pPredictionChromoso
         trained_GAN = hicGAN.HiCGAN(log_dir=outputFolder, number_factors=nr_factors, scope=pScope)
         trained_GAN.loadGenerator(trainedModelPath=trainedmodel)
         predictionFiles = []
-        for chrom, record, container, nr_samples in zip(chromNameList, tfRecordFilenames, testdataContainerList, sampleSizeList):
+        predictedChroms = []
+        # Derive the chromosome from the container itself rather than the
+        # originally requested chromNameList: some chromosomes may have been
+        # skipped (too few bins at this binSize), so positional zipping with
+        # the full request list would misalign names and predictions.
+        for record, container, nr_samples in zip(tfRecordFilenames, testdataContainerList, sampleSizeList):
+            chrom = container.chromosome
             storedFeaturesDict = container.storedFeatures
-            testDs = tf.data.TFRecordDataset(record, 
-                                                num_parallel_reads=None,
-                                                compression_type="GZIP")
+            testDs = tf.data.TFRecordDataset(record,
+                                                num_parallel_reads=tf.data.experimental.AUTOTUNE,
+                                                compression_type=records.TFRECORD_COMPRESSION or "")
             testDs = testDs.map(lambda x: records.parse_function(x, storedFeaturesDict), num_parallel_calls=tf.data.experimental.AUTOTUNE)
             testDs = testDs.batch(batchSize, drop_remainder=False)
             testDs = testDs.prefetch(tf.data.experimental.AUTOTUNE)
 
-            # Predict in batches to manage memory usage
+            # Stream predictions one batch at a time. Each batch is reduced to
+            # its upper-triangle as float16 immediately, so the full-chromosome
+            # float32 stack is never held in memory and the dataset is decoded
+            # exactly once (the previous save-memory path used dataset.skip(),
+            # which re-decodes the dataset O(numberOfBatches) times).
+            triu_r, triu_c = np.triu_indices(windowSize)
+            log.debug("Streaming predictions and extracting triangles...")
             predBatches = []
-            triu_indices = np.triu_indices(windowSize)
-            if pSaveMemory:
-                total_batches = pNumberOfBatches  # You can adjust this to 5 or more
-                batch_size = max(1, nr_samples // max(1, total_batches))
-                log.debug("Predicting on dataset in %d batches to save memory..." % total_batches)
-                for batch_idx in range(0, nr_samples, batch_size):
-                    batch_pred = trained_GAN.predict(test_ds=testDs.skip(batch_idx).take(batch_size), steps_per_record=1)
-                    batch_pred_array = np.array([np.array(x[triu_indices], dtype=np.float16) for x in batch_pred], dtype=np.float16)
-                    predBatches.append(batch_pred_array)
-                
+            for batch_pred in trained_GAN.predict_stream(test_ds=testDs):
+                # vectorized upper-triangle extraction: (batch, W, W) -> (batch, n_triu)
+                predBatches.append(batch_pred[:, triu_r, triu_c].astype(np.float16))
+            if predBatches:
                 predArray = np.concatenate(predBatches, axis=0).astype(np.float16)
-                del predBatches
             else:
-                log.debug("Predicting on full dataset...")
-                predDs = trained_GAN.predict(test_ds=testDs, steps_per_record=1)
-                log.debug("Converting predictions to numpy arrays...")
-                predArray = np.array([np.array(x[triu_indices], dtype=np.float16) for x in predDs], dtype=np.float16)
-                del predDs
+                log.warning("No predictions produced for chr%s", chrom)
+                predArray = np.empty((0, triu_r.size), dtype=np.float16)
+            del predBatches
 
             predFile = os.path.join(predictionChunksDir, f"pred_chr{chrom}.npy")
             np.save(predFile, predArray, allow_pickle=False)
             predictionFiles.append(predFile)
+            predictedChroms.append(chrom)
             log.info("Wrote predictions for chr%s to %s", chrom, predFile)
             del predArray
         log.debug("Prediction on all chromosomes completed.")
+        # keep the downstream chromosome list consistent with what was predicted
+        chromNameList = predictedChroms
 
         log.info("Cleaning up temporary files...")
         for tfrecordfile in tfRecordFilenames:
