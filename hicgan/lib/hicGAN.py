@@ -31,8 +31,14 @@ class HiCGAN():
                     adam_beta_1: float = 0.5,
                     pretrained_model_path: str = "",
                     scope=None,
-                    restore_checkpoint: bool = False): 
+                    mixed_precision: bool = False,
+                    restore_checkpoint: bool = False):
         super().__init__()
+        # When True, optimizers are wrapped for loss scaling and the loss
+        # functions cast their inputs to float32. The global mixed_float16
+        # policy itself is set by the caller (training.main) before this model
+        # is constructed so that all layers pick it up.
+        self.mixed_precision = mixed_precision
 
         self.OUTPUT_CHANNELS = 1
         self.INPUT_CHANNELS = 1
@@ -47,6 +53,10 @@ class HiCGAN():
         self.loss_type_pixel = loss_type_pixel
         self.generator_optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate_generator, beta_1=adam_beta_1, name="Adam_Generator")
         self.discriminator_optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate_discriminator, beta_1=adam_beta_1, name="Adam_Discriminator")
+        if self.mixed_precision:
+            # Dynamic loss scaling to keep float16 gradients from underflowing.
+            self.generator_optimizer = tf.keras.mixed_precision.LossScaleOptimizer(self.generator_optimizer)
+            self.discriminator_optimizer = tf.keras.mixed_precision.LossScaleOptimizer(self.discriminator_optimizer)
 
         self.generator_embedding = self.cnn_embedding()
         self.discriminator_embedding = self.cnn_embedding()         
@@ -244,6 +254,11 @@ class HiCGAN():
 
 
     def generator_loss(self, disc_generated_output, gen_output, target):
+        # Compute the loss in float32 (no-op without mixed precision; required
+        # for numerical stability and dtype matching when float16 is active).
+        disc_generated_output = tf.cast(disc_generated_output, tf.float32)
+        gen_output = tf.cast(gen_output, tf.float32)
+        target = tf.cast(target, tf.float32)
         advers_loss = tf.reduce_mean( tf.nn.sigmoid_cross_entropy_with_logits(labels=tf.ones_like(disc_generated_output), logits=disc_generated_output) )
         # mean squared error or mean absolute error
         if self.loss_type_pixel == "L1":
@@ -301,6 +316,8 @@ class HiCGAN():
         return tf.keras.Model(inputs=[inp, tar], outputs=d, name="Discriminator")
 
     def discriminator_loss(self, disc_real_output, disc_generated_output):
+        disc_real_output = tf.cast(disc_real_output, tf.float32)
+        disc_generated_output = tf.cast(disc_generated_output, tf.float32)
         real_loss = tf.reduce_mean( tf.nn.sigmoid_cross_entropy_with_logits(labels=tf.ones_like(disc_real_output), logits=disc_real_output) )
         generated_loss = tf.reduce_mean( tf.nn.sigmoid_cross_entropy_with_logits(labels=tf.zeros_like(disc_generated_output), logits=disc_generated_output) )
         total_disc_loss = self.loss_weight_discriminator * (real_loss + generated_loss)
@@ -323,10 +340,21 @@ class HiCGAN():
             gen_total_loss, _, _ = self.generator_loss(disc_generated_output, gen_output, target)
             disc_loss, disc_real_loss, disc_gen_loss = self.discriminator_loss(disc_real_output, disc_generated_output)
 
-        generator_gradients = gen_tape.gradient(gen_total_loss,
-                                                self.generator.trainable_variables)
-        discriminator_gradients = disc_tape.gradient(disc_loss,
-                                                    self.discriminator.trainable_variables)
+            if self.mixed_precision:
+                # scaled loss must be computed inside the tape
+                scaled_gen_loss = self.generator_optimizer.get_scaled_loss(gen_total_loss)
+                scaled_disc_loss = self.discriminator_optimizer.get_scaled_loss(disc_loss)
+
+        if self.mixed_precision:
+            generator_gradients = self.generator_optimizer.get_unscaled_gradients(
+                gen_tape.gradient(scaled_gen_loss, self.generator.trainable_variables))
+            discriminator_gradients = self.discriminator_optimizer.get_unscaled_gradients(
+                disc_tape.gradient(scaled_disc_loss, self.discriminator.trainable_variables))
+        else:
+            generator_gradients = gen_tape.gradient(gen_total_loss,
+                                                    self.generator.trainable_variables)
+            discriminator_gradients = disc_tape.gradient(disc_loss,
+                                                        self.discriminator.trainable_variables)
 
         self.generator_optimizer.apply_gradients(zip(generator_gradients,
                                                 self.generator.trainable_variables))
@@ -544,6 +572,36 @@ class HiCGAN():
         
         return total_prediction
     
+    def predict_stream(self, test_ds):
+        '''
+        Memory-bounded streaming prediction.
+
+        Iterates the dataset exactly once and yields the (squeezed) prediction
+        for one batch at a time as a numpy array of shape (batch, W, W). The
+        caller is expected to reduce each batch immediately (e.g. extract the
+        upper triangle as float16), so the full-chromosome float32 stack is
+        never materialised. This avoids both the giant concatenation in
+        predict() and the quadratic dataset.skip() re-decoding used by the old
+        save-memory prediction loop.
+        '''
+        if self.generator is None:
+            raise ValueError("Generator is None. Please call loadGenerator() first.")
+        for batch in test_ds:
+            # robust input extraction (mirrors predict())
+            if isinstance(batch, (tuple, list)):
+                if isinstance(batch[0], dict) and "factorData" in batch[0]:
+                    input_data = batch[0]["factorData"]
+                else:
+                    input_data = batch[0]
+            elif isinstance(batch, dict):
+                input_data = batch.get("factorData", batch)
+            else:
+                input_data = batch
+            val = self.predictionStep(input_batch=input_data, training=False).numpy()
+            if val.ndim == 4 and val.shape[-1] == 1:
+                val = np.squeeze(val, axis=-1)
+            yield val
+
     @tf.function
     def predictionStep(self, input_batch, training=False):
         return self.generator(input_batch, training=training)
