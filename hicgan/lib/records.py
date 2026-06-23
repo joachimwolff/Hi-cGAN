@@ -1,9 +1,14 @@
 import tensorflow as tf
 import numpy as np
-from concurrent.futures import ThreadPoolExecutor
 
 import logging
 log = logging.getLogger(__name__)
+
+# Compression used for TFRecords. Must be identical when writing (create-data)
+# and reading (train / predict). Set to None (or "") to disable compression:
+# this makes record writing and the training read path noticeably faster at the
+# cost of more disk space (not RAM). The reader sites import this constant.
+TFRECORD_COMPRESSION = "GZIP"
 
 
 #parse serialized input to tensors
@@ -45,17 +50,13 @@ def writeTFRecord(pFilename: str, pRecordDict: dict):
         msg = "Batch sizes are not equal"
         raise ValueError(msg)
     
-    with tf.io.TFRecordWriter(pFilename, options="GZIP") as writer:
+    keys = list(pRecordDict)
+    with tf.io.TFRecordWriter(pFilename, options=TFRECORD_COMPRESSION) as writer:
         for i in range(list(batches)[0]):
-            feature = dict()
-            def process_feature(key):
-                return key, _bytes_feature(pRecordDict[key][i].flatten().tostring())
-
-            with ThreadPoolExecutor() as executor:
-                futures = [executor.submit(process_feature, key) for key in pRecordDict]
-                for future in futures:
-                    key, value = future.result()
-                    feature[key] = value
+            # Only a couple of keys per record; serialise them directly.
+            # The previous code spun up (and tore down) a ThreadPoolExecutor
+            # for every single sample, which was pure overhead.
+            feature = {key: _bytes_feature(pRecordDict[key][i].tobytes()) for key in keys}
             example = tf.train.Example(features=tf.train.Features(feature=feature))
             writer.write(example.SerializeToString())
 
