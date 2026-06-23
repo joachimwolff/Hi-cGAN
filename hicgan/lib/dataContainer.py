@@ -166,8 +166,8 @@ class DataContainer():
 
     def unloadData(self):
         #unload all data to save memory, but do not touch metadata
-        self.__unloadFactorData
-        self.__unloadMatrixData
+        self.__unloadFactorData()
+        self.__unloadMatrixData()
         self.windowSize = None
         self.flankingSize = None
         self.maximumDistance = None
@@ -285,6 +285,19 @@ class DataContainer():
         self.storedFeatures = storedFeaturesDict
         return recordfiles
 
+    def hasEnoughBins(self):
+        '''
+        True if this chromosome has enough bins (at the current binSize) to
+        produce at least one sliding-window sample for the configured
+        windowSize/flankingSize. The sliding window spans
+        windowSize + 2*flankingSize bins, so chromosomes that are short
+        relative to the chosen resolution (large binSize) yield no samples.
+        '''
+        if not self.data_loaded or self.FactorDataArray is None:
+            return False
+        required_bins = self.windowSize + 2 * self.flankingSize
+        return self.FactorDataArray.shape[0] >= required_bins
+
     def getNumberSamples(self):
         if not self.data_loaded:
             return None
@@ -296,6 +309,17 @@ class DataContainer():
                 nr_samples_list.append(featureArray.shape[0] - cutout + 1)
             else:
                 nr_samples_list.append(0)
+        #if the (only) available feature is too short for one window, give an
+        #actionable message instead of the cryptic "binning went wrong" below.
+        #This is the typical failure when predicting at a coarse binSize.
+        if not any(x > 0 for x in nr_samples_list):
+            required_bins = self.windowSize + 2 * self.flankingSize
+            nr_bins = self.FactorDataArray.shape[0] if self.FactorDataArray is not None else 0
+            msg = ("Chromosome {:s} has only {:d} bins at binSize {:s}, but windowSize {:d} "
+                   "(+2x flanking) needs at least {:d} bins to form one window. "
+                   "Use a finer binSize (smaller -b) or a smaller windowSize, or drop this chromosome.").format(
+                       str(self.chromosome), nr_bins, str(self.binSize), self.windowSize, required_bins)
+            raise RuntimeError(msg)
         #check if all features have the same number of samples
         if len(set( [x for x in nr_samples_list if x>0] )) != 1:
 
@@ -446,12 +470,4 @@ class DataContainer():
                 recordDict[key] = np.array(featData)
                 storedFeaturesDict[key] = {"shape": recordDict[key].shape[1:], "dtype": tfdtypes.as_dtype(recordDict[key].dtype)}
 
-        def process_feature(key):
-            featData = [feature[key] for feature in data]
-            if not any(elem is None for elem in featData):
-                recordDict[key] = np.array(featData)
-                storedFeaturesDict[key] = {"shape": recordDict[key].shape[1:], "dtype": tfdtypes.as_dtype(recordDict[key].dtype)}
-
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            executor.map(process_feature, data[0].keys())
         return recordDict, storedFeaturesDict
