@@ -126,6 +126,8 @@ def parse_arguments(args=None):
                         help="Number of threads to use for TFRecord writing.")
     parser.add_argument("--resume", "-r", required=False, action='store_true',
                         help="If set, attempt to resume training by loading the latest checkpoint from the output folder.")
+    parser.add_argument("--mixedPrecision", "-mp", required=False, action='store_true',
+                        help="Enable mixed-precision (float16) training. Faster and uses less GPU memory on modern GPUs; does not change system RAM usage.")
     parser.add_argument("--keepTFRecords", "-k", required=False,
                         action='store_true',
                         default=False,
@@ -278,7 +280,8 @@ def training(pTfRecordFilenames,
              pStoredFeaturesDict,
              pNumberSamplesList,
              pNumberOfFactors,
-             pResume=False
+             pResume=False,
+             pMixedPrecision=False
              ):
 
         traindataRecords = [item for sublist in pTfRecordFilenames[0:pLengthTrainDataContainerList] for item in sublist]
@@ -307,9 +310,9 @@ def training(pTfRecordFilenames,
 
         #build the input streams for training
         shuffleBufferSize = 3*pRecordSize
-        trainDs = tf.data.TFRecordDataset(traindataRecords, 
+        trainDs = tf.data.TFRecordDataset(traindataRecords,
                                             num_parallel_reads=tf.data.experimental.AUTOTUNE,
-                                            compression_type="GZIP")
+                                            compression_type=records.TFRECORD_COMPRESSION or "")
         trainDs = trainDs.map(lambda x: records.parse_function(x, pStoredFeaturesDict), num_parallel_calls=tf.data.experimental.AUTOTUNE)
         if pFlipSamples:
             flippedDs = trainDs.map(lambda a,b: records.mirror_function(a["factorData"], b["out_matrixData"]))
@@ -318,9 +321,9 @@ def training(pTfRecordFilenames,
         trainDs = trainDs.batch(pBatchSize, drop_remainder=True)
         trainDs = trainDs.prefetch(tf.data.experimental.AUTOTUNE)
         #build the input streams for validation
-        validationDs = tf.data.TFRecordDataset(valdataRecords, 
+        validationDs = tf.data.TFRecordDataset(valdataRecords,
                                                 num_parallel_reads=tf.data.experimental.AUTOTUNE,
-                                                compression_type="GZIP")
+                                                compression_type=records.TFRECORD_COMPRESSION or "")
         validationDs = validationDs.map(lambda x: records.parse_function(x, pStoredFeaturesDict) , num_parallel_calls=tf.data.experimental.AUTOTUNE)
         validationDs = validationDs.batch(pBatchSize)
         validationDs = validationDs.prefetch(tf.data.experimental.AUTOTUNE)
@@ -343,6 +346,7 @@ def training(pTfRecordFilenames,
                                         plot_type=pFigureFileFormat,
                                         plot_frequency=pPlotFrequency,
                                         scope=pScope,
+                                        mixed_precision=pMixedPrecision,
                                         restore_checkpoint=pResume)
         
         hicGanModel.plotModels(pOutputPath=pOutputFolder, pFigureFileFormat=pFigureFileFormat)
@@ -442,7 +446,15 @@ def main(args=None):
         except Exception as e:
             print("Error during GPU setup: {}".format(e))
             raise e
-    if (args.createDataOnly and not args.trainOnly) or (not args.createDataOnly and not args.trainOnly):
+
+        if args.mixedPrecision:
+            # Set before any model layers are constructed so they adopt float16.
+            tf.keras.mixed_precision.set_global_policy("mixed_float16")
+            log.info("Mixed precision enabled: global policy = %s", tf.keras.mixed_precision.global_policy().name)
+    # Only force the CPU strategy for a *pure* create-data run. In "all" mode
+    # the GPU strategy selected above must survive, otherwise this line would
+    # overwrite it and training would silently fall back to the CPU (~300 s/iter).
+    if args.createDataOnly and not args.trainOnly:
         strategy = tf.distribute.OneDeviceStrategy(device="/CPU:0")
 
 
@@ -513,7 +525,8 @@ def main(args=None):
                 pStoredFeaturesDict=storedFeatures,
                 pNumberSamplesList=nr_samples_list,
                 pNumberOfFactors=nr_factors,
-                pResume=args.resume
+                pResume=args.resume,
+                pMixedPrecision=args.mixedPrecision
             )
         if not args.keepTFRecords and ((args.trainOnly and not args.createDataOnly) or (not args.createDataOnly and not args.trainOnly)):
             delete_model_files(pTFRecordFiles=tfRecordFilenames)
