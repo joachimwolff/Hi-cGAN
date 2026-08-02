@@ -89,6 +89,25 @@ def parse_arguments(args=None):
     parser.add_argument("--noScaleNorm", "-nsn", required=False,
                         action='store_false',
                         help="Do not scale normalization of chromatin features to 0-1 range.")
+    parser.add_argument("--minTargetCoverage", "-mtc", required=False,
+                        type=float,
+                        default=0.0,
+                        help="Skip holes in the target matrix: drop every training sample whose "
+                             "target submatrix has a smaller fraction of covered bins than this. "
+                             "Covered means the bin has at least one contact, so gaps of the Hi-C "
+                             "matrix (unmappable regions, or regions a published dataset does not "
+                             "cover) are not handed to the model as blocks of zeros. 0 (the default) "
+                             "keeps every sample and reproduces the previous behaviour; 0.95 keeps "
+                             "only near-fully covered windows.")
+    parser.add_argument("--excludeRegions", "-exr", required=False,
+                        type=str, nargs="+", default=None,
+                        help="BED file(s) listing regions to leave out of training. Every sample "
+                             "whose target window overlaps one of these regions is dropped. Use it "
+                             "to hold regions out deliberately, e.g. another method's test set or "
+                             "a blacklist. Chromosome names may be given with or without the 'chr' "
+                             "prefix. The chromatin features of a kept sample may still reach into "
+                             "an excluded region through its flanks; no target from an excluded "
+                             "region is ever used.")
     parser.add_argument("--figureFileFormat", "-ft", required=False,
                         type=str, choices=["png", "pdf", "svg"],
                         default="png",
@@ -156,7 +175,9 @@ def create_data(pTrainingMatrices,
                 pRecordSize,
                 noScaleNorm=False,
                 pSaveMemory=True,
-                pThreads=4):
+                pThreads=4,
+                pMinTargetCoverage=0.0,
+                pExcludeRegions=None):
     os.makedirs(pOutputFolder, exist_ok=True)
     #few constants
     # windowSize = int(windowSize)
@@ -213,20 +234,35 @@ def create_data(pTrainingMatrices,
                 "scaleTargets": noScaleNorm,
                 "windowSize": pWindowSize,
                 "flankingSize": pWindowSize,
-                "maximumDistance": None}
+                "maximumDistance": None,
+                "minTargetCoverage": pMinTargetCoverage,
+                "excludedRegions": pExcludeRegions}
+    if pExcludeRegions:
+        missing = [f for f in pExcludeRegions if not os.path.isfile(f)]
+        if missing:
+            msg = "Aborting. BED file(s) given to --excludeRegions not found: {:s}"
+            raise SystemExit(msg.format(", ".join(missing)))
     #now load the data and write TFRecords, one container at a time.
     if len(traindataContainerList) == 0:
         msg = "Exiting. No data found"
         print(msg)
         return #nothing to do
-    container0 = traindataContainerList[0]
+    referenceContainer = traindataContainerList[0]
     tfRecordFilenames = []
     nr_samples_list = []
+    usedTrainContainerList = []
     for container in traindataContainerList + valdataContainerList:
         container.loadData(**loadParams)
-        if not container0.checkCompatibility(container):
+        if not referenceContainer.checkCompatibility(container):
             msg = "Aborting. Incompatible data"
             raise SystemExit(msg)
+        nr_samples = container.getNumberSamples()
+        if not nr_samples:
+            #only reachable with pMinTargetCoverage > 0: the whole chromosome is a
+            #gap in the target matrix. Drop it instead of writing an empty record.
+            msg = "Skipping chromosome {:s}: no sample left after skipping gaps in the target"
+            print(msg.format(str(container.chromosome)))
+            continue
         tfRecordFilenames.append(container.writeTFRecord(pOutputFolder=pOutputFolder,
                                                         pRecordSize=pRecordSize,
                                                         pSaveMemory=pSaveMemory,
@@ -240,8 +276,16 @@ def create_data(pTrainingMatrices,
                                         outpath=pOutputFolder,
                                         figureFileFormat=pFigureFileFormat)
             container.saveMatrix(outputpath=pOutputFolder, index=idx)
-        nr_samples_list.append(container.getNumberSamples())
+        nr_samples_list.append(nr_samples)
+        if container in traindataContainerList:
+            usedTrainContainerList.append(container)
     print('ALL TF RECORDS CREATED!')
+    if len(usedTrainContainerList) == 0:
+        msg = "Exiting. No training sample left after skipping gaps in the target matrix"
+        raise SystemExit(msg)
+    #metadata is taken from a container that actually produced records, because
+    #storedFeatures is only set by writeTFRecord
+    container0 = usedTrainContainerList[0]
 
     #data is no longer needed
     for container in traindataContainerList + valdataContainerList:
@@ -249,14 +293,14 @@ def create_data(pTrainingMatrices,
     
     print(tfRecordFilenames)
     print(len(tfRecordFilenames))
-    print(len(traindataContainerList))
+    print(len(usedTrainContainerList))
 
     #different binSizes are ok
     #not clear which binSize to use for prediction when they differ during training.
-    #For now, store the max. 
-    binSize = max([container.binSize for container in traindataContainerList])
+    #For now, store the max.
+    binSize = max([container.binSize for container in usedTrainContainerList])
 
-    return tfRecordFilenames, len(traindataContainerList), nr_samples_list, container0.storedFeatures, container0.nr_factors
+    return tfRecordFilenames, len(usedTrainContainerList), nr_samples_list, container0.storedFeatures, container0.nr_factors
 
 def training(pTfRecordFilenames,
              pLengthTrainDataContainerList,
@@ -475,7 +519,9 @@ def main(args=None):
                         args.recordSize,
                         args.noScaleNorm,
                         args.saveMemory,
-                        args.threads)
+                        args.threads,
+                        pMinTargetCoverage=args.minTargetCoverage,
+                        pExcludeRegions=args.excludeRegions)
             if args.createDataOnly:
                 meta = {
                     "tfRecordFilenames": tfRecordFilenames,

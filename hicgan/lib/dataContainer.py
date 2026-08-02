@@ -36,6 +36,9 @@ class DataContainer():
         self.windowSize = None
         self.flankingSize = None
         self.maximumDistance = None
+        self.minTargetCoverage = 0.0
+        self.excludedRegions = None
+        self.sampleIndices = None
         self.data_loaded = False
 
     def __loadFactorData(self, ignoreChromLengths=False, scaleFeatures=False, clampFeatures=False):
@@ -171,9 +174,11 @@ class DataContainer():
         self.windowSize = None
         self.flankingSize = None
         self.maximumDistance = None
+        self.sampleIndices = None
+        self.excludedRegions = None
         self.data_loaded = False
-    
-    def loadData(self, windowSize, flankingSize=None, maximumDistance=None, scaleFeatures=False, clampFeatures=False, scaleTargets=False):
+
+    def loadData(self, windowSize, flankingSize=None, maximumDistance=None, scaleFeatures=False, clampFeatures=False, scaleTargets=False, minTargetCoverage=0.0, excludedRegions=None):
         if not isinstance(windowSize, int):
             msg = "windowSize must be integer"
             raise TypeError(msg)
@@ -184,7 +189,10 @@ class DataContainer():
         self.windowSize = windowSize
         self.flankingSize = flankingSize
         self.maximumDistance = maximumDistance
+        self.minTargetCoverage = float(minTargetCoverage)
+        self.excludedRegions = excludedRegions
         self.data_loaded = True
+        self.__computeSampleIndices()
 
     def checkCompatibility(self, containerIterable):
         ret = []
@@ -242,6 +250,11 @@ class DataContainer():
             print(msg)
             return None
         nr_samples = self.getNumberSamples()
+        if not nr_samples:
+            msg = "Warning: chromosome {:s} has no sample, no TFRecord written"
+            print(msg.format(str(self.chromosome)))
+            self.storedFiles = []
+            return []
         #adjust record size (yields smaller files and reduces memory load)
         recordsize = nr_samples
         if pRecordSize is not None and pRecordSize < recordsize:
@@ -298,7 +311,179 @@ class DataContainer():
         required_bins = self.windowSize + 2 * self.flankingSize
         return self.FactorDataArray.shape[0] >= required_bins
 
+    def getBinCoverage(self):
+        '''
+        Boolean array, one entry per bin of the Hi-C matrix, True where the bin
+        has at least one contact. Bins inside a gap of the matrix (unmappable
+        regions, or the windows a published dataset simply does not cover, such
+        as Akita's target folds) have an all-zero row and come out False.
+        Returns None if no matrix is loaded.
+        '''
+        if self.sparseHiCMatrix is None:
+            return None
+        rowNnz = np.asarray((self.sparseHiCMatrix != 0).sum(axis=1)).ravel()
+        return rowNnz > 0
+
+    def getExcludedBins(self):
+        '''
+        Boolean array, one entry per bin, True where the bin overlaps a region
+        listed in the BED file(s) given as excludedRegions. Returns None if no
+        BED file was given or none of its regions falls on this chromosome.
+
+        Both naming conventions are accepted in the BED file, "chr21" and "21",
+        regardless of which one the matrix and the bigwig files use.
+        '''
+        if not self.excludedRegions:
+            return None
+        pathList = self.excludedRegions
+        if isinstance(pathList, str):
+            pathList = [pathList]
+        nr_bins = self.__getNumberBins()
+        if not nr_bins:
+            return None
+        excluded = np.zeros(nr_bins, dtype=bool)
+        bareName = str(self.chromosome)
+        acceptedNames = {bareName, "chr" + bareName.lstrip("chr")}
+        nr_regions = 0
+        for path in pathList:
+            with open(path, "r") as bedfile:
+                for lineNr, line in enumerate(bedfile, start=1):
+                    line = line.strip()
+                    if not line or line.startswith(("#", "track", "browser")):
+                        continue
+                    fields = line.split()
+                    if len(fields) < 3:
+                        msg = "Skipping line {:d} of {:s}: fewer than 3 columns"
+                        log.warning(msg.format(lineNr, path))
+                        continue
+                    if fields[0] not in acceptedNames:
+                        continue
+                    try:
+                        start, end = int(fields[1]), int(fields[2])
+                    except ValueError:
+                        msg = "Skipping line {:d} of {:s}: start/end not integers"
+                        log.warning(msg.format(lineNr, path))
+                        continue
+                    if end <= start:
+                        continue
+                    #BED is half-open and 0-based, so a region ending exactly on a
+                    #bin boundary must not mark the following bin
+                    firstBin = max(0, start // self.binSize)
+                    lastBin = min(nr_bins, int(np.ceil(end / float(self.binSize))))
+                    if lastBin > firstBin:
+                        excluded[firstBin:lastBin] = True
+                        nr_regions += 1
+        if nr_regions == 0:
+            return None
+        msg = "Chromosome {:s}: {:d} excluded region(s) from BED cover {:d} of {:d} bins"
+        print(msg.format(str(self.chromosome), nr_regions, int(excluded.sum()), nr_bins))
+        return excluded
+
+    def __getNumberBins(self):
+        if self.sparseHiCMatrix is not None:
+            return self.sparseHiCMatrix.shape[0]
+        if self.FactorDataArray is not None:
+            return self.FactorDataArray.shape[0]
+        return 0
+
+    def __computeSampleIndices(self):
+        '''
+        Decide which sliding-window positions are used as samples.
+
+        By default every position is used, self.sampleIndices stays None and
+        nothing about the container changes. Two filters can restrict the set,
+        and they combine:
+
+        1. minTargetCoverage > 0 drops the positions whose TARGET submatrix lies
+           in a gap of the Hi-C matrix, instead of handing them to the model as
+           a block of zeros. This matters because __getMatrixData() runs the
+           target through nan_to_num, so a missing region is indistinguishable
+           from a region of genuinely zero contacts: the model is otherwise
+           taught to predict an empty map wherever the data happen to be absent.
+           On Akita's published GM12878 train fold, for instance, 25 % of the
+           window positions on the training chromosomes fall into such gaps.
+
+           Coverage is measured per bin rather than per pixel (see
+           getBinCoverage); gaps are contiguous stretches of the matrix with no
+           contacts at all, so the two agree, and the per-bin form is O(n)
+           instead of O(n * windowSize^2).
+
+        2. excludedRegions drops every position whose target window overlaps a
+           region listed in a BED file. Use it to hold regions out of training
+           deliberately: another method's test set, a blacklist, a locus kept
+           for evaluation. The overlap is tested against the target window only.
+           Chromatin features from the flanks may still reach into an excluded
+           region, which is intended: no label from that region is ever used,
+           but the model still sees the context around the windows it keeps.
+        '''
+        self.sampleIndices = None
+        excluded = self.getExcludedBins()
+        useCoverage = self.minTargetCoverage > 0.0
+        if useCoverage and self.sparseHiCMatrix is None:
+            msg = "minTargetCoverage is set but no Hi-C matrix is loaded; coverage filter ignored"
+            log.warning(msg)
+            useCoverage = False
+        if not useCoverage and excluded is None:
+            return
+        nr_samples = self.__getNumberRawSamples()
+        if not nr_samples:
+            return
+        flankingSize = self.flankingSize if self.flankingSize is not None else self.windowSize
+        nr_bins = self.__getNumberBins()
+        startInd = np.arange(nr_samples) + flankingSize
+        #windows running past the end of the matrix (the factor array can be
+        #longer than the matrix) count the missing bins as uncovered
+        stopInd = np.minimum(startInd + self.windowSize, nr_bins)
+
+        keep = np.ones(nr_samples, dtype=bool)
+        nr_gaps = 0
+        nr_excluded = 0
+        if useCoverage:
+            #cumulative sum gives the covered-bin count of every window in one pass
+            cumulative = np.concatenate(([0], np.cumsum(self.getBinCoverage())))
+            coverage = (cumulative[stopInd] - cumulative[startInd]) / float(self.windowSize)
+            coverageOK = coverage >= self.minTargetCoverage
+            nr_gaps = int((~coverageOK).sum())
+            keep &= coverageOK
+        if excluded is not None:
+            cumulativeExcl = np.concatenate(([0], np.cumsum(excluded)))
+            untouched = (cumulativeExcl[stopInd] - cumulativeExcl[startInd]) == 0
+            nr_excluded = int((~untouched).sum())
+            keep &= untouched
+
+        self.sampleIndices = np.nonzero(keep)[0]
+        msg = "Chromosome {:s}: keeping {:d} of {:d} samples ({:.1f} %)".format(
+            str(self.chromosome), len(self.sampleIndices), nr_samples,
+            100.0 * len(self.sampleIndices) / nr_samples)
+        if useCoverage:
+            msg += "; {:d} below target coverage {:.2f}".format(nr_gaps, self.minTargetCoverage)
+        if excluded is not None:
+            msg += "; {:d} overlapping an excluded region".format(nr_excluded)
+        print(msg)
+        if len(self.sampleIndices) == 0:
+            msg = ("Chromosome {:s} has no window left. Either it is not covered by the target "
+                   "matrix, or minTargetCoverage ({:.2f}) is too strict for windowSize {:d}, or "
+                   "the excluded regions span it entirely.").format(
+                       str(self.chromosome), self.minTargetCoverage, self.windowSize)
+            log.warning(msg)
+
+    def mapSampleIndex(self, idx):
+        '''
+        Translate a sample index (0 .. getNumberSamples()-1) into the window
+        position it refers to. Identity unless gaps are being skipped.
+        '''
+        if self.sampleIndices is None:
+            return idx
+        return int(self.sampleIndices[idx])
+
     def getNumberSamples(self):
+        if not self.data_loaded:
+            return None
+        if self.sampleIndices is not None:
+            return len(self.sampleIndices)
+        return self.__getNumberRawSamples()
+
+    def __getNumberRawSamples(self):
         if not self.data_loaded:
             return None
         featureArrays = [self.FactorDataArray, self.sparseHiCMatrix, self.sequenceArray]
@@ -372,6 +557,7 @@ class DataContainer():
     def getSampleData(self, idx):
         if not self.data_loaded:
             return None
+        idx = self.mapSampleIndex(idx)
         factorArray = self.__getFactorData(idx)
         matrixArray = self.__getMatrixData(idx)
         if matrixArray is not None:
@@ -439,7 +625,7 @@ class DataContainer():
         if isinstance(index, int) and index < self.getNumberSamples():
             tmpMat = np.zeros(shape=(windowSize, windowSize))
             indices = np.mask_indices(windowSize, utils.maskFunc, k=maximumDistance)
-            tmpMat[indices] = self.__getMatrixData(idx=index)
+            tmpMat[indices] = self.__getMatrixData(idx=self.mapSampleIndex(index))
             sparseMatrix = csr_matrix(tmpMat)
         else:
             sparseMatrix = self.sparseHiCMatrix
