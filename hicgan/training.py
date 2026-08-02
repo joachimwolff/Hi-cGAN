@@ -126,8 +126,11 @@ def parse_arguments(args=None):
                         help="Enable multi-GPU training.")
     parser.add_argument("--whichGPU", "-wgpu", required=False,
                         type=int,
-                        default="",
-                        help="Specify which GPU to use for training in the single GPU case. E.g. 1, 2, etc.")
+                        default=1,
+                        help="Specify which GPU to use for training in the single GPU case. "
+                             "One-based: 1 is the first GPU. The default was the string \"\", "
+                             "which argparse ran through type=int and rejected, so omitting this "
+                             "argument aborted the run.")
     parser.add_argument("--saveMemory", "-sm", required=False,
                         action='store_true',
                         help="Save memory by not loading all data into memory at once.")

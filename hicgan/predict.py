@@ -62,8 +62,11 @@ def parse_arguments(args=None):
                         help="Number of batches to split predictions when --saveMemory is enabled")
     parser.add_argument("--whichGPU", "-wgpu", required=False,
                         type=int,
-                        default="",
-                        help="Specify which GPU to use for training in the single GPU case. E.g. 1, 2, etc.")
+                        default=1,
+                        help="Specify which GPU to use for prediction in the single GPU case. "
+                             "One-based: 1 is the first GPU. The default was the string \"\", "
+                             "which argparse ran through type=int and rejected, so omitting this "
+                             "argument aborted the run.")
     parser.add_argument("--mode", "-m", required=False,
                         type=str,
                         choices=["create-data", "predict", "make-matrix", 'all'],
