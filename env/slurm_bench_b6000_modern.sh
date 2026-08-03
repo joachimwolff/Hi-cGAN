@@ -34,6 +34,7 @@ conda init >/dev/null 2>&1 || true
 hash -r
 source activate hicgan
 python -c "import tensorflow as tf,os;b=tf.sysconfig.get_build_info();print('TF',tf.__version__,'CUDA',b.get('cuda_version'),'cuDNN',b.get('cudnn_version'))"
+python "$HICGAN/env/bench_raw_gpu.py" --size 8192 --iters 20 || echo "raw bench failed"
 python "$BENCH" --window 512 --batch 50 --steps 25 --hicgan "$HICGAN" || echo "old stack failed"
 conda deactivate || true
 
@@ -41,10 +42,18 @@ echo
 echo "==================== NEW STACK: TF 2.21 / CUDA 12.9 / cuDNN 9.24"
 source "$HICGAN/env/activate_modern_tf.sh"
 python -c "import tensorflow as tf,os;b=tf.sysconfig.get_build_info();print('TF',tf.__version__,'CUDA',b.get('cuda_version'),'cuDNN',b.get('cudnn_version'))"
+python "$HICGAN/env/bench_raw_gpu.py" --size 8192 --iters 20 || echo "raw bench failed"
 python "$BENCH" --window 512 --batch 50 --steps 25 --hicgan "$HICGAN" || echo "new stack failed"
 
 echo
-echo "Compare the samples/s and the mixed/float32 ratio between the two blocks."
+echo "THE DECISIVE NUMBER is the matmul fp16/fp32 ratio. On an RTX 4090 with"
+echo "native sm_89 support it is 2.52x (37.4 -> 94.4 TFLOPS). If the b6000"
+echo "reports a ratio near 1.0 its tensor cores are not being used, which is what"
+echo "PTX JIT from compute_90 would cause, and the diagnosis is confirmed. If it"
+echo "reports 2-3x with high absolute TFLOPS, the hardware is fine and the"
+echo "bottleneck is somewhere else -- in which case this explanation is wrong."
+echo
+echo "Then compare the samples/s and the mixed/float32 ratio between the blocks."
 echo "If the new stack is materially faster, or mixed precision finally helps,"
 echo "the training scripts should switch to it. If both are ~63 samples/s the"
 echo "card is simply not faster than an A100 for this model."
