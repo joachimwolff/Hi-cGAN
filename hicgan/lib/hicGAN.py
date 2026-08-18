@@ -389,7 +389,17 @@ class HiCGAN():
         plt.close(fig1)
         del fig1, axs1
 
-    def fit(self, train_ds, epochs, test_ds, steps_per_epoch: int):
+    def fit(self, train_ds, epochs, test_ds, steps_per_epoch: int,
+            validation_steps: int = 0):
+        """validation_steps > 0 evaluates only that many validation batches.
+
+        Validation runs the WHOLE validation set every epoch and, unlike the
+        training step, is not distributed across replicas -- so its cost is
+        fixed while the training half gets faster with every GPU added. On the
+        chr21 pilot it was ~145 s against 94 s of actual training on two GPUs;
+        on eight it would dominate the epoch completely. A few hundred windows
+        track the loss curve just as well.
+        """
         distributed_dataset = self.scope.experimental_distribute_dataset(train_ds)
         
         if self.start_epoch > 0 and self.start_epoch < epochs:
@@ -432,7 +442,8 @@ class HiCGAN():
 
             # Validation
             validation_samples_in_epoch = 0
-            for input_image, target in test_ds:
+            vds = test_ds.take(validation_steps) if validation_steps else test_ds
+            for input_image, target in vds:
                 gen_loss_val, disc_loss_val = self.validationStep(input_image["factorData"], target["out_matrixData"])
                 self.__gen_val_loss_batches.append(gen_loss_val)
                 self.__disc_val_loss_batches.append(disc_loss_val)
@@ -493,10 +504,22 @@ class HiCGAN():
         generatorEmbeddingPlotName = os.path.join(pOutputPath, generatorEmbeddingPlotName)
         discriminatorEmbeddingPlotName = "discriminatorEmbeddingModel.{:s}".format(pFigureFileFormat)
         discriminatorEmbeddingPlotName = os.path.join(pOutputPath, discriminatorEmbeddingPlotName)
-        tf.keras.utils.plot_model(self.generator, show_shapes=True, to_file=generatorPlotName)
-        tf.keras.utils.plot_model(self.discriminator, show_shapes=True, to_file=discriminatorPlotName)
-        tf.keras.utils.plot_model(self.generator_embedding, show_shapes=True, to_file=generatorEmbeddingPlotName)
-        tf.keras.utils.plot_model(self.discriminator_embedding, show_shapes=True, to_file=discriminatorEmbeddingPlotName)
+        #Architecture diagrams are a nicety, and they need pydot plus a graphviz
+        #binary. Without them keras raises ImportError, which used to abort the
+        #whole training run before a single step -- losing the job over a
+        #picture. Warn and carry on instead.
+        for model, name in ((self.generator, generatorPlotName),
+                            (self.discriminator, discriminatorPlotName),
+                            (self.generator_embedding, generatorEmbeddingPlotName),
+                            (self.discriminator_embedding, discriminatorEmbeddingPlotName)):
+            try:
+                tf.keras.utils.plot_model(model, show_shapes=True, to_file=name)
+            except (ImportError, OSError) as ex:
+                msg = ("skipping the architecture diagram {:s}: {:s}. "
+                       "Install pydot and graphviz if you want it; training is "
+                       "unaffected.").format(name, str(ex).split("\n")[0])
+                print(msg)
+                break
 
     # def predict(self, test_ds, steps_per_record):
     #     predictedArray = []

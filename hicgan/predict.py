@@ -54,6 +54,29 @@ def parse_arguments(args=None):
                         type=int,
                         choices=[64, 128, 256, 512, 768, 1024],
                         help="Window size for predicting; must be the same as in trained model. Supported values are 64, 128, and 256")
+    parser.add_argument("--targetValueRange", "-tvr", required=False,
+                        type=str,
+                        help="Undo the [0, 1] mapping that training applied, so the "
+                             "prediction comes back in the target's real units. Either a "
+                             "path to the target_value_range.json written by hicTraining "
+                             "--scaleTargetToUnitRange, or \"min,max\" given directly. When "
+                             "set, the min-max rescaling and --multiplier are NOT applied: "
+                             "those map onto the single brightest pixel of each chromosome, "
+                             "which makes values incomparable between chromosomes and "
+                             "between runs. If the model was trained without "
+                             "--scaleTargetToUnitRange, leave this unset.")
+    parser.add_argument("--includeRegions", "-ir", required=False,
+                        type=str,
+                        nargs='+',
+                        help="One or more BED files. Predict ONLY the sliding-window "
+                             "positions whose target window lies entirely inside one of "
+                             "these regions, instead of running over the whole chromosome. "
+                             "Pass the same BED that training was given as --excludeRegions "
+                             "to predict exactly the held-out loci: containment here is the "
+                             "exact complement of the overlap test used there, so no "
+                             "predicted window can contain a bin the model was trained on. "
+                             "The output cooler covers the whole chromosome and is empty "
+                             "outside the predicted windows.")
     parser.add_argument("--saveMemory", "-sm", action="store_true",
                         help="Enable memory-saving mode for prediction")
     parser.add_argument("--numberOfBatches", "-nb", required=False,
@@ -80,7 +103,8 @@ def parse_arguments(args=None):
     return parser
 
 def createDataContainer(pChromNameList, pOutputFolder, pChromatinFolder, pBinSize, 
-                        scalefactors, clampfactors, scalematrix, windowSize, flankingsize, maxdist, batchSize):
+                        scalefactors, clampfactors, scalematrix, windowSize, flankingsize, maxdist, batchSize,
+                        includedRegions=None):
     
     containerCls = dataContainer.DataContainer
     testdataContainerList = []
@@ -94,7 +118,8 @@ def createDataContainer(pChromNameList, pOutputFolder, pChromatinFolder, pBinSiz
                   "scaleTargets": scalematrix,
                   "windowSize": windowSize,
                   "flankingSize": flankingsize,
-                  "maximumDistance": maxdist}
+                  "maximumDistance": maxdist,
+                  "includedRegions": includedRegions}
     if len(testdataContainerList) == 0:
         msg = "Exiting. No data found"
         print(msg)
@@ -109,6 +134,12 @@ def createDataContainer(pChromNameList, pOutputFolder, pChromatinFolder, pBinSiz
     keptContainers = []
     tfRecordFilenames = []
     sampleSizeList = []
+    # Which sliding-window position each sample came from, and how many bins the
+    # chromosome has. Both are needed to put the predicted triangles back in the
+    # right place when --includeRegions restricts the sample set, and both are
+    # gone after unloadData(), so they are captured here.
+    windowStartsList = []
+    matrixSizeList = []
     for container in testdataContainerList:
         container.loadData(**loadParams)
         if not container.hasEnoughBins():
@@ -128,6 +159,10 @@ def createDataContainer(pChromNameList, pOutputFolder, pChromatinFolder, pBinSiz
         tfRecordFilenames.append(container.writeTFRecord(pOutputFolder=pOutputFolder,
                                                         pRecordSize=None)[0])
         sampleSizeList.append(int(np.ceil(container.getNumberSamples() / batchSize)))
+        nr_bins_chrom = container.FactorDataArray.shape[0] if container.FactorDataArray is not None else 0
+        matrixSizeList.append(int(nr_bins_chrom))
+        windowStartsList.append(None if container.sampleIndices is None
+                                else np.asarray(container.sampleIndices, dtype=np.int64))
         keptContainers.append(container)
 
     if container0 is None:
@@ -140,9 +175,9 @@ def createDataContainer(pChromNameList, pOutputFolder, pChromatinFolder, pBinSiz
     nr_factors = container0.nr_factors
     for container in keptContainers:
         container.unloadData()
-    return keptContainers, tfRecordFilenames, sampleSizeList, nr_factors
+    return keptContainers, tfRecordFilenames, sampleSizeList, nr_factors, windowStartsList, matrixSizeList
 
-def prediction(pTrainedModel, pPredictionChromosomesFolders, pPredictionChromosomes, pOutputFolder, pMultiplier, pBinSize, pBatchSize, pWindowSize, pMatrixOutputName, pParameterOutputFile, pSaveMemory=False, pNumberOfBatches=20, pScope=None, pMode="all"):
+def prediction(pTrainedModel, pPredictionChromosomesFolders, pPredictionChromosomes, pOutputFolder, pMultiplier, pBinSize, pBatchSize, pWindowSize, pMatrixOutputName, pParameterOutputFile, pSaveMemory=False, pNumberOfBatches=20, pScope=None, pMode="all", pIncludeRegions=None, pTargetValueRange=None):
     trainedmodel = pTrainedModel
     predictionChromosomesFolders = pPredictionChromosomesFolders
     predictionChromosomes = pPredictionChromosomes
@@ -154,6 +189,20 @@ def prediction(pTrainedModel, pPredictionChromosomesFolders, pPredictionChromoso
 
     if not os.path.exists(outputFolder):
         os.mkdir(outputFolder)
+    #resolve the value range the model was trained against, if one was used
+    targetValueRange = None
+    if pTargetValueRange:
+        if os.path.exists(str(pTargetValueRange)):
+            targetValueRange = utils.loadValueRange(pTargetValueRange)
+        else:
+            try:
+                lo, hi = (float(x) for x in str(pTargetValueRange).split(","))
+                targetValueRange = (lo, hi)
+            except Exception:
+                raise SystemExit(
+                    "--targetValueRange must be a path to target_value_range.json "
+                    "or \"min,max\"; got {!r}".format(pTargetValueRange))
+        log.info("undoing the unit-range mapping with [%g, %g]", *targetValueRange)
     scalefactors = True
     clampfactors = False
     scalematrix = True
@@ -172,7 +221,7 @@ def prediction(pTrainedModel, pPredictionChromosomesFolders, pPredictionChromoso
     chromNameList = sorted([x.lstrip("chr") for x in predictionChromosomes])
 
     if pMode in ["create-data", "all"]:
-        testdataContainerList, tfRecordFilenames, sampleSizeList, nr_factors = createDataContainer(
+        testdataContainerList, tfRecordFilenames, sampleSizeList, nr_factors, windowStartsList, matrixSizeList = createDataContainer(
             pChromNameList=chromNameList, 
             pOutputFolder=outputFolder, 
             pChromatinFolder=predictionChromosomesFolders, 
@@ -183,13 +232,16 @@ def prediction(pTrainedModel, pPredictionChromosomesFolders, pPredictionChromoso
             windowSize=windowSize, 
             flankingsize=flankingsize, 
             maxdist=maxdist, 
-            batchSize=batchSize)
+            batchSize=batchSize,
+            includedRegions=pIncludeRegions)
         if pMode == "create-data":
             save_vars = {
                 "testdataContainerList": testdataContainerList,
                 "tfRecordFilenames": tfRecordFilenames,
                 "sampleSizeList": sampleSizeList,
                 "nr_factors": nr_factors,
+                "windowStartsList": windowStartsList,
+                "matrixSizeList": matrixSizeList,
             }
 
             pickle_path = os.path.join(outputFolder, "prediction_vars.pkl")
@@ -211,6 +263,9 @@ def prediction(pTrainedModel, pPredictionChromosomesFolders, pPredictionChromoso
         tfRecordFilenames = loaded_vars["tfRecordFilenames"]
         sampleSizeList = loaded_vars["sampleSizeList"]
         nr_factors = loaded_vars["nr_factors"]
+        #absent in pickles written before --includeRegions existed
+        windowStartsList = loaded_vars.get("windowStartsList")
+        matrixSizeList = loaded_vars.get("matrixSizeList")
 
     if pMode in ["predict", "all"]:
         trained_GAN = hicGAN.HiCGAN(log_dir=outputFolder, number_factors=nr_factors, scope=pScope)
@@ -268,6 +323,8 @@ def prediction(pTrainedModel, pPredictionChromosomesFolders, pPredictionChromoso
                 "predictionFiles": predictionFiles,
                 "chromNameList": chromNameList,
                 "windowSize": windowSize,
+                "windowStartsList": windowStartsList,
+                "matrixSizeList": matrixSizeList,
             }
 
             pickle_path = os.path.join(outputFolder, "predictions.pkl")
@@ -287,6 +344,8 @@ def prediction(pTrainedModel, pPredictionChromosomesFolders, pPredictionChromoso
 
         predictionFiles = loaded_vars.get("predictionFiles")
         chromNameList = loaded_vars["chromNameList"]
+        windowStartsList = loaded_vars.get("windowStartsList")
+        matrixSizeList = loaded_vars.get("matrixSizeList")
         if "windowSize" in loaded_vars:
             windowSize = int(loaded_vars["windowSize"])
 
@@ -315,11 +374,27 @@ def prediction(pTrainedModel, pPredictionChromosomesFolders, pPredictionChromoso
 
         log.debug("Rebuilding full matrices from predicted triangles one chromosome at a time...")
         matrixFiles = []
-        for chrom, predFile in zip(chromNameList, predictionFiles):
+        #None when the whole chromosome was predicted, which is the common case
+        #and the behaviour rebuildMatrix defaults to
+        if not windowStartsList:
+            windowStartsList = [None] * len(chromNameList)
+        if not matrixSizeList:
+            matrixSizeList = [None] * len(chromNameList)
+        for chrom, predFile, windowStarts, matrixSize in zip(chromNameList, predictionFiles,
+                                                             windowStartsList, matrixSizeList):
             log.info("Loading prediction chunk for chr%s from %s", chrom, predFile)
             predTriangles = np.load(predFile, mmap_mode="r")
-            predMatrix = utils.rebuildMatrix(pArrayOfTriangles=predTriangles, pWindowSize=windowSize, pFlankingSize=windowSize, pSaveMemory=pSaveMemory)
-            predMatrix = utils.scaleArray(predMatrix) * multiplier
+            predMatrix = utils.rebuildMatrix(pArrayOfTriangles=predTriangles, pWindowSize=windowSize, pFlankingSize=windowSize, pSaveMemory=pSaveMemory,
+                                             pWindowStarts=windowStarts, pMatrixSize=matrixSize)
+            if targetValueRange is not None:
+                #Invert exactly what training applied. Note this replaces the
+                #min-max rescaling rather than following it: scaleArray divides
+                #by the largest pixel of THIS chromosome, so one outlier sets
+                #the scale for everything else and two chromosomes end up in
+                #different units.
+                predMatrix = utils.fromUnitRange(predMatrix, *targetValueRange)
+            else:
+                predMatrix = utils.scaleArray(predMatrix) * multiplier
 
             matrixFile = os.path.join(matrixChunksDir, f"matrix_chr{chrom}.npz")
             if sparse.isspmatrix(predMatrix):
@@ -393,4 +468,6 @@ def main(args=None):
         pSaveMemory=args.saveMemory,
         pNumberOfBatches=args.numberOfBatches,
         pScope=None, 
-        pMode=args.mode)
+        pMode=args.mode,
+        pIncludeRegions=args.includeRegions,
+        pTargetValueRange=args.targetValueRange)

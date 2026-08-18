@@ -38,6 +38,8 @@ class DataContainer():
         self.maximumDistance = None
         self.minTargetCoverage = 0.0
         self.excludedRegions = None
+        self.includedRegions = None
+        self.targetValueRange = None
         self.sampleIndices = None
         self.data_loaded = False
 
@@ -176,9 +178,11 @@ class DataContainer():
         self.maximumDistance = None
         self.sampleIndices = None
         self.excludedRegions = None
+        self.includedRegions = None
+        self.targetValueRange = None
         self.data_loaded = False
 
-    def loadData(self, windowSize, flankingSize=None, maximumDistance=None, scaleFeatures=False, clampFeatures=False, scaleTargets=False, minTargetCoverage=0.0, excludedRegions=None):
+    def loadData(self, windowSize, flankingSize=None, maximumDistance=None, scaleFeatures=False, clampFeatures=False, scaleTargets=False, minTargetCoverage=0.0, excludedRegions=None, includedRegions=None, targetValueRange=None):
         if not isinstance(windowSize, int):
             msg = "windowSize must be integer"
             raise TypeError(msg)
@@ -191,6 +195,8 @@ class DataContainer():
         self.maximumDistance = maximumDistance
         self.minTargetCoverage = float(minTargetCoverage)
         self.excludedRegions = excludedRegions
+        self.includedRegions = includedRegions
+        self.targetValueRange = targetValueRange
         self.data_loaded = True
         self.__computeSampleIndices()
 
@@ -324,24 +330,28 @@ class DataContainer():
         rowNnz = np.asarray((self.sparseHiCMatrix != 0).sum(axis=1)).ravel()
         return rowNnz > 0
 
-    def getExcludedBins(self):
+    def __binsFromBed(self, pPathList, pLabel):
         '''
         Boolean array, one entry per bin, True where the bin overlaps a region
-        listed in the BED file(s) given as excludedRegions. Returns None if no
-        BED file was given or none of its regions falls on this chromosome.
+        listed in the given BED file(s). Returns None if no file was given or
+        none of its regions falls on this chromosome.
 
         Both naming conventions are accepted in the BED file, "chr21" and "21",
         regardless of which one the matrix and the bigwig files use.
+
+        Shared by getExcludedBins and getIncludedBins: the two differ only in
+        what the caller does with the result, so parsing lived in one of them
+        and was about to be copied into the other.
         '''
-        if not self.excludedRegions:
+        if not pPathList:
             return None
-        pathList = self.excludedRegions
+        pathList = pPathList
         if isinstance(pathList, str):
             pathList = [pathList]
         nr_bins = self.__getNumberBins()
         if not nr_bins:
             return None
-        excluded = np.zeros(nr_bins, dtype=bool)
+        marked = np.zeros(nr_bins, dtype=bool)
         bareName = str(self.chromosome)
         acceptedNames = {bareName, "chr" + bareName.lstrip("chr")}
         nr_regions = 0
@@ -371,13 +381,31 @@ class DataContainer():
                     firstBin = max(0, start // self.binSize)
                     lastBin = min(nr_bins, int(np.ceil(end / float(self.binSize))))
                     if lastBin > firstBin:
-                        excluded[firstBin:lastBin] = True
+                        marked[firstBin:lastBin] = True
                         nr_regions += 1
         if nr_regions == 0:
             return None
-        msg = "Chromosome {:s}: {:d} excluded region(s) from BED cover {:d} of {:d} bins"
-        print(msg.format(str(self.chromosome), nr_regions, int(excluded.sum()), nr_bins))
-        return excluded
+        msg = "Chromosome {:s}: {:d} {:s} region(s) from BED cover {:d} of {:d} bins"
+        print(msg.format(str(self.chromosome), nr_regions, pLabel,
+                         int(marked.sum()), nr_bins))
+        return marked
+
+    def getExcludedBins(self):
+        '''
+        Bins overlapping a region of the excludedRegions BED file(s).
+        '''
+        return self.__binsFromBed(self.excludedRegions, "excluded")
+
+    def getIncludedBins(self):
+        '''
+        Bins overlapping a region of the includedRegions BED file(s).
+
+        This is the counterpart used at PREDICTION time: it restricts the
+        sliding window to a named set of loci instead of running over the whole
+        chromosome. The intended use is to predict exactly the regions that were
+        held out of training, so nothing the model was fitted on is scored.
+        '''
+        return self.__binsFromBed(self.includedRegions, "included")
 
     def __getNumberBins(self):
         if self.sparseHiCMatrix is not None:
@@ -415,15 +443,26 @@ class DataContainer():
            Chromatin features from the flanks may still reach into an excluded
            region, which is intended: no label from that region is ever used,
            but the model still sees the context around the windows it keeps.
+
+        3. includedRegions is the mirror image, used at prediction time: keep
+           ONLY the positions whose target window lies ENTIRELY inside a region
+           listed in a BED file. Containment, not overlap, and deliberately so.
+           It makes filter 3 the exact complement of filter 2: a window that
+           training dropped for touching an excluded region is a window that
+           overlaps it, and the windows fully inside are a subset of those. So
+           predicting with includedRegions = the same BED that training was
+           given as excludedRegions cannot produce a window containing a single
+           bin the model was fitted on.
         '''
         self.sampleIndices = None
         excluded = self.getExcludedBins()
+        included = self.getIncludedBins()
         useCoverage = self.minTargetCoverage > 0.0
         if useCoverage and self.sparseHiCMatrix is None:
             msg = "minTargetCoverage is set but no Hi-C matrix is loaded; coverage filter ignored"
             log.warning(msg)
             useCoverage = False
-        if not useCoverage and excluded is None:
+        if not useCoverage and excluded is None and included is None:
             return
         nr_samples = self.__getNumberRawSamples()
         if not nr_samples:
@@ -438,6 +477,7 @@ class DataContainer():
         keep = np.ones(nr_samples, dtype=bool)
         nr_gaps = 0
         nr_excluded = 0
+        nr_outside = 0
         if useCoverage:
             #cumulative sum gives the covered-bin count of every window in one pass
             cumulative = np.concatenate(([0], np.cumsum(self.getBinCoverage())))
@@ -450,6 +490,16 @@ class DataContainer():
             untouched = (cumulativeExcl[stopInd] - cumulativeExcl[startInd]) == 0
             nr_excluded = int((~untouched).sum())
             keep &= untouched
+        if included is not None:
+            #fully contained: every bin of the target window is marked. The
+            #window length is stopInd - startInd rather than self.windowSize,
+            #because a window running past the end of the matrix is shorter and
+            #comparing against the nominal size would reject all of them.
+            cumulativeIncl = np.concatenate(([0], np.cumsum(included)))
+            inside = ((cumulativeIncl[stopInd] - cumulativeIncl[startInd])
+                      == (stopInd - startInd))
+            nr_outside = int((~inside).sum())
+            keep &= inside
 
         self.sampleIndices = np.nonzero(keep)[0]
         msg = "Chromosome {:s}: keeping {:d} of {:d} samples ({:.1f} %)".format(
@@ -459,12 +509,16 @@ class DataContainer():
             msg += "; {:d} below target coverage {:.2f}".format(nr_gaps, self.minTargetCoverage)
         if excluded is not None:
             msg += "; {:d} overlapping an excluded region".format(nr_excluded)
+        if included is not None:
+            msg += "; {:d} not fully inside an included region".format(nr_outside)
         print(msg)
         if len(self.sampleIndices) == 0:
             msg = ("Chromosome {:s} has no window left. Either it is not covered by the target "
                    "matrix, or minTargetCoverage ({:.2f}) is too strict for windowSize {:d}, or "
-                   "the excluded regions span it entirely.").format(
-                       str(self.chromosome), self.minTargetCoverage, self.windowSize)
+                   "the excluded regions span it entirely, or no included region is as long as "
+                   "one window ({:d} bins = {:d} bp).").format(
+                       str(self.chromosome), self.minTargetCoverage, self.windowSize,
+                       self.windowSize, self.windowSize * self.binSize)
             log.warning(msg)
 
     def mapSampleIndex(self, idx):
@@ -533,6 +587,20 @@ class DataContainer():
         stopInd = startInd + windowSize
         trainmatrix = self.sparseHiCMatrix[startInd:stopInd,startInd:stopInd].todense()
         trainmatrix = np.array(np.nan_to_num(trainmatrix))
+        if self.targetValueRange is not None:
+            #Map the target onto [0, 1], the range the generator's sigmoid can
+            #actually produce. The bounds come from the data (see
+            #utils.observedValueRange), not from a constant, and the SAME bounds
+            #are used for every chromosome and inverted at prediction time.
+            #
+            #Without this the target keeps its native range. For an Akita-style
+            #target that is roughly [-2, +2] with 56 % of a window below zero,
+            #and a sigmoid cannot emit a negative number at all: the pixel loss
+            #then carries an offset it can never remove, and the discriminator
+            #can separate real from generated on sign alone, which makes the
+            #adversarial gradient useless.
+            lo, hi = self.targetValueRange
+            trainmatrix = utils.toUnitRange(trainmatrix, lo, hi)
         trainmatrix = np.expand_dims(trainmatrix, axis=-1) #make Hi-C (sub-)matrix an RGB image
         return trainmatrix
     

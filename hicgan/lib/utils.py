@@ -120,6 +120,18 @@ def scaleArray(pArray):
         msg = "cannot normalize empty array"
         print(msg)
         return pArray
+    #A sparse matrix holding negative values cannot be shifted: scipy refuses to
+    #subtract a nonzero scalar because it would have to materialise every
+    #implicit zero. Say so here rather than letting the caller meet scipy's
+    #message, which does not hint at the cause or the cure.
+    if sparse.issparse(pArray) and pArray.min() < 0:
+        raise NotImplementedError(
+            "scaleArray cannot min-max a SPARSE matrix whose values go negative "
+            "(min {:.4g}). An Akita-style log observed/expected target is about "
+            "half negative. Use hicTraining --scaleTargetToUnitRange instead: it "
+            "measures the range once, maps the dense target window onto [0, 1], "
+            "and records the range so hicPredict --targetValueRange can invert "
+            "it.".format(float(pArray.min())))
     if pArray.max() - pArray.min() != 0:
         normArray = (pArray - pArray.min()) / (pArray.max() - pArray.min())
     elif pArray.max() > 0: #min = max >0
@@ -127,6 +139,90 @@ def scaleArray(pArray):
     else: #min=max <= 0
         normArray = np.zeros_like(pArray)
     return normArray
+
+def observedValueRange(pMatrixFilePaths, pChromosomes=None):
+    """Smallest and largest value actually present in the target matrices.
+
+    Measured, not assumed. The range is taken over the STORED entries only: an
+    absent entry in a sparse Hi-C matrix means "not observed", not "value zero",
+    and letting it into the range would drag the minimum to 0 for any target
+    whose real values are negative.
+
+    One range is computed across every training matrix and chromosome, and the
+    same one is then used everywhere. A per-chromosome range would map the same
+    physical value to a different target on chr1 than on chr2, so the model
+    would be chasing a target that moves between chromosomes.
+    """
+    vmin, vmax = np.inf, -np.inf
+    for path in ([pMatrixFilePaths] if isinstance(pMatrixFilePaths, str)
+                 else pMatrixFilePaths):
+        prefix = getChromPrefixCooler(path)
+        chroms = pChromosomes
+        if chroms is None:
+            chroms = [c.replace(prefix, "", 1) for c in getChromSizesFromCooler(path)]
+        for chrom in chroms:
+            name = prefix + str(chrom).replace(prefix, "", 1)
+            try:
+                M, _ = getMatrixFromCooler(path, name)
+            except Exception:
+                continue
+            if M is None:
+                continue
+            data = M.data if sparse.issparse(M) else np.asarray(M).ravel()
+            data = data[np.isfinite(data)]
+            if data.size == 0:
+                continue
+            vmin = min(vmin, float(data.min()))
+            vmax = max(vmax, float(data.max()))
+    if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax <= vmin:
+        msg = "could not determine a usable value range from the target matrices"
+        raise ValueError(msg)
+    return vmin, vmax
+
+
+def toUnitRange(pArray, pMin, pMax):
+    """Map a DENSE array from [pMin, pMax] onto [0, 1].
+
+    Dense on purpose. The same map on a sparse matrix would have to shift the
+    implicit zeros too, which scipy refuses ("subtracting a nonzero scalar from
+    a sparse array is not supported") -- the error that made the old
+    scaleArray() path unusable for any signed target. Target windows are
+    densified before use anyway, so the transform is applied there.
+    """
+    span = float(pMax) - float(pMin)
+    if span <= 0:
+        return np.zeros_like(pArray, dtype=float)
+    return np.clip((np.asarray(pArray, dtype=float) - float(pMin)) / span, 0.0, 1.0)
+
+
+def fromUnitRange(pMatrix, pMin, pMax):
+    """Inverse of toUnitRange: [0, 1] back to [pMin, pMax], the real units.
+
+    On a sparse matrix only the STORED values are mapped. That is deliberate:
+    an unstored pixel was never predicted, and giving it pMin would invent a
+    maximally depleted contact everywhere the model said nothing.
+    """
+    span = float(pMax) - float(pMin)
+    if sparse.issparse(pMatrix):
+        out = pMatrix.copy().astype(np.float64)
+        out.data = out.data * span + float(pMin)
+        return out
+    return np.asarray(pMatrix, dtype=float) * span + float(pMin)
+
+
+def saveValueRange(pPath, pMin, pMax):
+    import json
+    with open(pPath, "w") as fh:
+        json.dump({"min": float(pMin), "max": float(pMax)}, fh, indent=1)
+    log.info("wrote target value range [%g, %g] to %s", pMin, pMax, pPath)
+
+
+def loadValueRange(pPath):
+    import json
+    with open(pPath) as fh:
+        d = json.load(fh)
+    return float(d["min"]), float(d["max"])
+
 
 def showMatrix(pMatrix):
     #test function to show matrices
@@ -296,11 +392,34 @@ def plotLoss(pGeneratorLossValueLists, pDiscLossValueLists, pGeneratorLossNameLi
 #     log.info("Matrix rebuilding complete. Mean matrix shape: %s", mean_matrix.shape)
 #     return mean_matrix
 
-def rebuildMatrix(pArrayOfTriangles, pWindowSize, pFlankingSize=None, pMaxDist=None, pStepsize=1, pSaveMemory=False):
+def rebuildMatrix(pArrayOfTriangles, pWindowSize, pFlankingSize=None, pMaxDist=None, pStepsize=1, pSaveMemory=False, pWindowStarts=None, pMatrixSize=None):
+    """Fold predicted upper triangles back into one chromosome matrix.
+
+    `pWindowStarts` is the sliding-window position each triangle came from. It
+    defaults to 0, 1, 2, ... which is right whenever every window position was
+    predicted. It is NOT right when the prediction was restricted to a subset of
+    positions (`--includeRegions`): triangle i then belongs at position
+    pWindowStarts[i], and assuming i would smear every prediction to the start
+    of the chromosome. `pMatrixSize` must be given with it, because the number
+    of triangles no longer determines the chromosome length.
+    """
     log.info("Rebuilding matrix from triangles with window size %d", pWindowSize)
     flankingSize = pFlankingSize if pFlankingSize is not None else pWindowSize
     nr_matrices = pArrayOfTriangles.shape[0]
-    matrix_size = nr_matrices - 1 + (pWindowSize + 2 * flankingSize)
+    if pWindowStarts is None:
+        windowStarts = np.arange(nr_matrices, dtype=np.int64)
+    else:
+        windowStarts = np.asarray(pWindowStarts, dtype=np.int64)
+        if windowStarts.shape[0] != nr_matrices:
+            raise ValueError(
+                "pWindowStarts has {:d} entries but there are {:d} triangles".format(
+                    windowStarts.shape[0], nr_matrices))
+    if pMatrixSize is not None:
+        matrix_size = int(pMatrixSize)
+    elif nr_matrices:
+        matrix_size = int(windowStarts.max()) + (pWindowSize + 2 * flankingSize)
+    else:
+        matrix_size = pWindowSize + 2 * flankingSize
 
     log.info(f"Number of triangles: {nr_matrices}, window size: {pWindowSize}, flanking size: {flankingSize}")
 
@@ -362,7 +481,7 @@ def rebuildMatrix(pArrayOfTriangles, pWindowSize, pFlankingSize=None, pMaxDist=N
 
         windowsInBuf = 0
         for i in tqdm(range(0, nr_matrices, stepsize), desc="rebuilding matrix"):
-            j = i + flankingSize
+            j = int(windowStarts[i]) + flankingSize
             tri = pArrayOfTriangles[i]
             vals = tri if tri.ndim == 1 else tri[r, c]
             bufRows.append(r + j)
@@ -385,7 +504,7 @@ def rebuildMatrix(pArrayOfTriangles, pWindowSize, pFlankingSize=None, pMaxDist=N
         rows_count, cols_count, vals_count = [], [], []
 
         for i in tqdm(range(0, nr_matrices, stepsize), desc="rebuilding matrix"):
-            j = i + flankingSize
+            j = int(windowStarts[i]) + flankingSize
             k = j + pWindowSize
 
             if pMaxDist is None or pMaxDist == pWindowSize:
