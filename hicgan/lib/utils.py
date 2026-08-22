@@ -392,7 +392,67 @@ def plotLoss(pGeneratorLossValueLists, pDiscLossValueLists, pGeneratorLossNameLi
 #     log.info("Matrix rebuilding complete. Mean matrix shape: %s", mean_matrix.shape)
 #     return mean_matrix
 
-def rebuildMatrix(pArrayOfTriangles, pWindowSize, pFlankingSize=None, pMaxDist=None, pStepsize=1, pSaveMemory=False, pWindowStarts=None, pMatrixSize=None):
+def bandToCsr(pBandSum, pStartCount, pWindowSize, pMatrixSize):
+    """Turn an accumulated band into the mean matrix, as CSR.
+
+    pBandSum holds, for every cell of the rebuilt matrix, the sum of the
+    contributions of all windows covering it, laid out as (pWindowSize,
+    pMatrixSize) indexed by [offset-from-diagonal, row]. pStartCount is how many
+    windows start at each position.
+
+    The divisor is never stored. How many windows cover a cell follows from the
+    start positions alone: a cell on diagonal d at row p is covered by the
+    windows starting in [p - (W-1-d), p], which one prefix sum answers for every
+    cell at once.
+    """
+    W = int(pWindowSize)
+    matrix_size = int(pMatrixSize)
+    band_sum = np.asarray(pBandSum).reshape(W, matrix_size)
+    cum = np.zeros(matrix_size + 1, dtype=np.int64)
+    np.cumsum(np.asarray(pStartCount, dtype=np.int64), out=cum[1:])
+
+    def _coverage(pDiagonal):
+        """How many windows cover each row of diagonal pDiagonal."""
+        k = W - 1 - pDiagonal
+        if k == 0:
+            shifted = cum[:matrix_size]
+        else:
+            shifted = np.concatenate((np.zeros(k, dtype=np.int64),
+                                      cum[:matrix_size - k]))
+        return cum[1:] - shifted
+
+    # The CSR is filled directly rather than going through COO. A COO built
+    # from the band would hold a second full copy of the values plus two
+    # index arrays, and .tocsr() would then allocate a third. Here the only
+    # arrays that ever exist are the band and the CSR itself. Within a row
+    # the diagonals are visited in increasing order, which is exactly CSR's
+    # required column order, so nothing has to be sorted either.
+    nnzPerRow = np.zeros(matrix_size, dtype=np.int32)
+    for dIdx in range(W):
+        nnzPerRow += (_coverage(dIdx) > 0) & (band_sum[dIdx] != 0)
+    indptr = np.zeros(matrix_size + 1, dtype=np.int64)
+    np.cumsum(nnzPerRow, out=indptr[1:])
+    del nnzPerRow
+    total = int(indptr[-1])
+    data = np.empty(total, dtype=np.float32)
+    indices = np.empty(total, dtype=np.int32)
+    running = np.zeros(matrix_size, dtype=np.int64)
+    for dIdx in range(W):
+        cov = _coverage(dIdx)
+        rowsHere = np.flatnonzero((cov > 0) & (band_sum[dIdx] != 0))
+        if rowsHere.size == 0:
+            continue
+        at = indptr[rowsHere] + running[rowsHere]
+        data[at] = band_sum[dIdx, rowsHere] / cov[rowsHere]
+        indices[at] = rowsHere + dIdx
+        running[rowsHere] += 1
+    del running, cum
+    return sparse.csr_matrix((data, indices, indptr),
+                             shape=(matrix_size, matrix_size),
+                             dtype=np.float32)
+
+
+def rebuildMatrix(pArrayOfTriangles, pWindowSize, pFlankingSize=None, pMaxDist=None, pStepsize=1, pSaveMemory=False, pWindowStarts=None, pMatrixSize=None, pProgress=True):
     """Fold predicted upper triangles back into one chromosome matrix.
 
     `pWindowStarts` is the sliding-window position each triangle came from. It
@@ -434,14 +494,30 @@ def rebuildMatrix(pArrayOfTriangles, pWindowSize, pFlankingSize=None, pMaxDist=N
 
     
     if pSaveMemory:
-        # Memory-bounded, vectorized rebuild.
-        # Instead of per-element lil_matrix assignment (slow: billions of
-        # Python-level ops for high-res chromosomes), accumulate the triangles
-        # into COO blocks and fold each block into running CSR sum/count
-        # matrices. COO->CSR sums duplicate (row, col) entries in C, and CSR
-        # addition is C-level too. Peak RAM is the final banded matrix plus a
-        # single block of indices, so high-resolution matrices stay well within
-        # the available RAM while being orders of magnitude faster than lil.
+        # Band accumulator.
+        #
+        # The rebuilt matrix is banded by construction: a window of pWindowSize
+        # bins can never place a value further than pWindowSize - 1 off the
+        # diagonal. So the whole result fits in a dense (pWindowSize,
+        # matrix_size) float32 array indexed by [offset-from-diagonal, row],
+        # which for a human chromosome at 2 kb is a few hundred MB.
+        #
+        # The previous implementation accumulated COO blocks and folded each one
+        # into a running CSR pair with `pSum = pSum + block_sum`. That is
+        # quadratic in the number of blocks: the running matrix grows toward the
+        # full band, and every flush reallocated and re-merged tens of millions
+        # of entries that were already final. A chromosome took minutes, almost
+        # all of it in those two additions.
+        #
+        # Here each window is a single in-place scatter-add into a fixed-size
+        # buffer. Nothing grows, nothing is merged, and the sparse matrix is
+        # built exactly once at the end. The per-window indices are the same
+        # every time up to the offset j * pWindowSize, so they are computed once.
+        #
+        # The band is stored offset-major, [d, row] rather than [row, d],
+        # because that is the layout in which a window's contribution to one
+        # diagonal is contiguous. Only the flat scatter is used below, but the
+        # layout is what makes the final CSR assembly a single pass.
         if pMaxDist is None or pMaxDist == pWindowSize:
             r, c = np.triu_indices(pWindowSize)
         else:
@@ -449,61 +525,41 @@ def rebuildMatrix(pArrayOfTriangles, pWindowSize, pFlankingSize=None, pMaxDist=N
         r = r.astype(np.int64)
         c = c.astype(np.int64)
         entriesPerWindow = max(1, r.size)
+        W = int(pWindowSize)
 
-        # Cap each COO block at ~5e7 entries to bound temporary memory.
-        targetEntriesPerBlock = 50_000_000
-        windowsPerBlock = max(1, int(targetEntriesPerBlock // entriesPerWindow))
-        log.info("Rebuilding in blocks of %d windows (%d entries/window)", windowsPerBlock, entriesPerWindow)
+        # flat index into a (W, matrix_size) band: (c - r) picks the diagonal,
+        # r picks the position within it. Adding j * 1 shifts along the
+        # chromosome, so a window at j scatters to flatBase + j.
+        flatBase = (c - r) * matrix_size + r
+        log.info("Rebuilding %d windows into a %d x %d band (%d entries/window)",
+                 nr_matrices, W, matrix_size, entriesPerWindow)
 
-        sum_matrix = sparse.csr_matrix((matrix_size, matrix_size), dtype=np.float32)
-        count_matrix = sparse.csr_matrix((matrix_size, matrix_size), dtype=np.float32)
+        # Only the SUM is accumulated. The divisor never has to be stored:
+        # how many windows cover a cell depends on the window starts alone, and
+        # for a cell on diagonal d at row p it is the number of starts in
+        # [p - (W-1-d), p], which one prefix sum over the start positions
+        # answers for every cell at once. That removes an array the size of the
+        # band, and halves the work in the scatter loop.
+        band_sum = np.zeros(W * matrix_size, dtype=np.float32)
+        startCount = np.zeros(matrix_size, dtype=np.int32)
 
-        bufRows, bufCols, bufVals = [], [], []
-
-        def _flush(pSum, pCount):
-            if not bufRows:
-                return pSum, pCount
-            rr = np.concatenate(bufRows)
-            cc = np.concatenate(bufCols)
-            vv = np.concatenate(bufVals)
-            block_sum = sparse.coo_matrix((vv, (rr, cc)),
-                                          shape=(matrix_size, matrix_size),
-                                          dtype=np.float32).tocsr()
-            block_cnt = sparse.coo_matrix((np.ones(vv.shape[0], dtype=np.float32), (rr, cc)),
-                                          shape=(matrix_size, matrix_size),
-                                          dtype=np.float32).tocsr()
-            pSum = pSum + block_sum
-            pCount = pCount + block_cnt
-            bufRows.clear()
-            bufCols.clear()
-            bufVals.clear()
-            return pSum, pCount
-
-        windowsInBuf = 0
-        for i in tqdm(range(0, nr_matrices, stepsize), desc="rebuilding matrix"):
+        for i in tqdm(range(0, nr_matrices, stepsize), desc="rebuilding matrix", disable=not pProgress):
             j = int(windowStarts[i]) + flankingSize
             tri = pArrayOfTriangles[i]
             vals = tri if tri.ndim == 1 else tri[r, c]
-            bufRows.append(r + j)
-            bufCols.append(c + j)
-            bufVals.append(np.asarray(vals, dtype=np.float32))
-            windowsInBuf += 1
-            if windowsInBuf >= windowsPerBlock:
-                sum_matrix, count_matrix = _flush(sum_matrix, count_matrix)
-                windowsInBuf = 0
-        sum_matrix, count_matrix = _flush(sum_matrix, count_matrix)
+            # every (row, offset) pair within one window is distinct, so a plain
+            # in-place add is correct here; np.add.at is not needed and is far
+            # slower
+            band_sum[flatBase + j] += vals
+            startCount[j] += 1
 
-        # mean = sum / count on covered cells (count > 0 wherever sum has an entry)
-        count_matrix = count_matrix.tocsr()
-        inv_count = count_matrix.copy()
-        inv_count.data = 1.0 / inv_count.data
-        mean_matrix = sum_matrix.multiply(inv_count).tocsr()
-        mean_matrix.eliminate_zeros()
+        mean_matrix = bandToCsr(band_sum, startCount, W, matrix_size)
+        del band_sum, startCount
     else:
         rows_all, cols_all, vals_all = [], [], []
         rows_count, cols_count, vals_count = [], [], []
 
-        for i in tqdm(range(0, nr_matrices, stepsize), desc="rebuilding matrix"):
+        for i in tqdm(range(0, nr_matrices, stepsize), desc="rebuilding matrix", disable=not pProgress):
             j = int(windowStarts[i]) + flankingSize
             k = j + pWindowSize
 
@@ -623,6 +679,107 @@ def hic_diagonal_sharpen(matrix, strength=0.5, decay=0.3):
     sharpened = matrix + strength * weight * edges
     
     return np.clip(sharpened, 0, None)
+
+
+def rebuildChromosomeToFile(pJob):
+    """Rebuild one chromosome from its predicted triangles and save it.
+
+    Everything a chromosome needs is in `pJob`, and nothing is returned but the
+    path, so this is safe to hand to a process pool: the 5 GB of triangles are
+    read from disk by the worker (memory-mapped, so only the windows actually
+    touched are paged in) and the assembled matrix is written by the worker.
+    Neither ever crosses the process boundary.
+
+    It lives in this module, and not in hicgan.predict, on purpose. A spawned
+    worker re-imports the module that defines its target, and importing
+    hicgan.predict would drag TensorFlow into every worker: seconds of start-up
+    and hundreds of MB of RAM each, for code that only uses numpy and scipy.
+    """
+    (predictionFile, matrixFile, windowSize, flankingSize, saveMemory,
+     windowStarts, matrixSize, targetValueRange, multiplier) = pJob
+    predTriangles = np.load(predictionFile, mmap_mode="r")
+    predMatrix = rebuildMatrix(pArrayOfTriangles=predTriangles,
+                               pWindowSize=windowSize,
+                               pFlankingSize=flankingSize,
+                               pSaveMemory=saveMemory,
+                               pWindowStarts=windowStarts,
+                               pMatrixSize=matrixSize,
+                               pProgress=False)
+    del predTriangles
+    if targetValueRange is not None:
+        predMatrix = fromUnitRange(predMatrix, *targetValueRange)
+    else:
+        predMatrix = scaleArray(predMatrix) * multiplier
+    if not sparse.isspmatrix(predMatrix):
+        predMatrix = sparse.csr_matrix(predMatrix)
+    sparse.save_npz(matrixFile, predMatrix.tocsr())
+    nnz = int(predMatrix.nnz)
+    del predMatrix
+    return matrixFile, nnz
+
+
+def rebuildChromosomeFromBand(pJob):
+    """Turn one chromosome's accumulated band into a saved matrix chunk.
+
+    The counterpart of rebuildChromosomeToFile for predictions that were summed
+    on the GPU. Nothing is folded here: the summing already happened, so this
+    only divides by the coverage and writes the sparse matrix.
+    """
+    (bandFile, matrixFile, windowSize, matrixSize, windowStarts,
+     targetValueRange, multiplier) = pJob
+    band = np.load(bandFile, mmap_mode="r")
+    startCount = np.bincount(np.asarray(windowStarts, dtype=np.int64),
+                             minlength=int(matrixSize))[:int(matrixSize)]
+    predMatrix = bandToCsr(band, startCount, windowSize, matrixSize)
+    del band
+    if targetValueRange is not None:
+        predMatrix = fromUnitRange(predMatrix, *targetValueRange)
+    else:
+        predMatrix = scaleArray(predMatrix) * multiplier
+    if not sparse.isspmatrix(predMatrix):
+        predMatrix = sparse.csr_matrix(predMatrix)
+    sparse.save_npz(matrixFile, predMatrix.tocsr())
+    nnz = int(predMatrix.nnz)
+    del predMatrix
+    return matrixFile, nnz
+
+
+def rebuildProcessCount(pRequested, pWindowSize, pMatrixSizes, pJobCount):
+    """How many chromosomes to rebuild at once without running out of RAM.
+
+    A worker's peak is dominated by the dense band it accumulates into,
+    windowSize x matrixSize float32, plus the CSR it builds from it. Two and a
+    half times the band is a safe allowance. The largest chromosome in the job
+    list sets the figure, because the pool may well be running it.
+
+    pRequested of 0 means "decide from the machine". Anything else is taken as
+    given, which is what a queueing system with its own memory limit wants.
+    """
+    if pRequested and int(pRequested) > 0:
+        return max(1, min(int(pRequested), pJobCount))
+    sizes = [s for s in (pMatrixSizes or []) if s]
+    largest = max(sizes) if sizes else 0
+    perWorker = 2.5 * int(pWindowSize) * largest * 4 if largest else 0
+    available = None
+    try:
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    available = int(line.split()[1]) * 1024
+                    break
+    except OSError:
+        pass
+    byMemory = pJobCount
+    if available and perWorker:
+        # leave a third of what is free alone; this runs alongside other things
+        byMemory = max(1, int((available * 0.66) // perWorker))
+    byCpu = max(1, (os.cpu_count() or 2) - 1)
+    n = max(1, min(pJobCount, byCpu, byMemory, 8))
+    if perWorker:
+        log.info("rebuilding with %d processes (~%.1f GB each, %.1f GB available)",
+                 n, perWorker / 2**30, (available or 0) / 2**30)
+    return n
+
 
 def writeCooler(pMatrixList, pBinSizeInt, pOutfile, pChromosomeList, pChromSizeList=None,  pMetadata=None):
     #takes a matrix as numpy array or sparse matrix and writes a cooler matrix from it

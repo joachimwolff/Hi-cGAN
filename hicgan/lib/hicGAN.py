@@ -625,6 +625,145 @@ class HiCGAN():
                 val = np.squeeze(val, axis=-1)
             yield val
 
+    def predict_stream_triu(self, test_ds, window_size):
+        '''Stream predictions already reduced to the upper triangle, float16.
+
+        predict_stream() copies the whole (batch, W, W) float32 tensor to the
+        host and leaves the caller to gather the upper triangle there. Both the
+        transfer and the gather happen between two GPU calls, so the card waits
+        through them: measured utilisation was 49% with a quarter of samples
+        below 5%.
+
+        Doing the gather inside the graph halves the bytes transferred, since
+        only the triangle crosses the bus and it crosses as float16 rather than
+        float32, and removes the host-side gather entirely.
+        '''
+        if self.generator is None:
+            raise ValueError("Generator is None. Please call loadGenerator() first.")
+        r, c = np.triu_indices(window_size)
+        flat = tf.constant(r * window_size + c, dtype=tf.int32)
+
+        @tf.function
+        def _step(inp):
+            out = self.predictionStep(input_batch=inp, training=False)
+            if out.shape.rank == 4 and out.shape[-1] == 1:
+                out = tf.squeeze(out, axis=-1)
+            out = tf.reshape(out, [tf.shape(out)[0], window_size * window_size])
+            return tf.cast(tf.gather(out, flat, axis=1), tf.float16)
+
+        for batch in test_ds:
+            if isinstance(batch, (tuple, list)):
+                if isinstance(batch[0], dict) and "factorData" in batch[0]:
+                    input_data = batch[0]["factorData"]
+                else:
+                    input_data = batch[0]
+            elif isinstance(batch, dict):
+                input_data = batch.get("factorData", batch)
+            else:
+                input_data = batch
+            yield _step(input_data).numpy()
+
+    @staticmethod
+    def _inputFromBatch(batch):
+        if isinstance(batch, (tuple, list)):
+            if isinstance(batch[0], dict) and "factorData" in batch[0]:
+                return batch[0]["factorData"]
+            return batch[0]
+        if isinstance(batch, dict):
+            return batch.get("factorData", batch)
+        return batch
+
+    def predict_band(self, test_ds, window_size, matrix_size, flanking_size,
+                     window_starts=None):
+        '''Predict a chromosome and sum the overlapping windows on the GPU.
+
+        The rebuilt matrix is banded: a window of W bins places nothing further
+        than W-1 off the diagonal, so the whole chromosome is a (W,
+        matrix_size) float32 array. Each window contributes to it and is then
+        finished with -- which is why shipping the windows themselves to the
+        host is so wasteful. Every cell of the band is covered by up to W
+        windows, so the per-window triangles are up to W redundant copies of
+        the same result: for a genome at 2 kb, 397 GB of them against 3 GB of
+        band.
+
+        Summing where the values are produced removes that entirely. Only the
+        band crosses the bus, once per chromosome, and no per-window file is
+        written at all. For chromosome 1 at 2 kb the band is 248 MB, which fits
+        on the card next to the generator with room to spare.
+
+        The scatter is a constant index pattern shifted along the chromosome:
+        the cell a window's (r, c) entry lands in is ((c-r), r + j), where j is
+        the window's start. So the flat indices are one precomputed vector plus
+        j, and duplicate targets within a batch are summed by the atomic add.
+
+        `window_starts` are the sliding-window positions the samples came from,
+        in the order the dataset yields them, or None when every position was
+        predicted and they are simply 0, 1, 2, ... The flanking size is added
+        here. Returns the band as (W, matrix_size) float32 together with the
+        number of windows summed into it.
+        '''
+        if self.generator is None:
+            raise ValueError("Generator is None. Please call loadGenerator() first.")
+        W = int(window_size)
+        matrixSize = int(matrix_size)
+        flanking = int(flanking_size)
+        starts = None if window_starts is None else np.asarray(window_starts, dtype=np.int32)
+        r, c = np.triu_indices(W)
+        #where within a window's flattened WxW output each triangle entry sits
+        flatWindow = tf.constant((r * W + c).astype(np.int32))
+        #and where it lands in the flattened (W, matrix_size) band, before the
+        #window's own offset along the chromosome is added
+        flatBase = tf.constant(((c - r).astype(np.int64) * matrixSize
+                                + r).astype(np.int32))
+
+        band = tf.Variable(tf.zeros([W * matrixSize], dtype=tf.float32),
+                           trainable=False)
+
+        @tf.function
+        def _step(inp, offsets):
+            out = self.predictionStep(input_batch=inp, training=False)
+            if out.shape.rank == 4 and out.shape[-1] == 1:
+                out = tf.squeeze(out, axis=-1)
+            out = tf.reshape(out, [tf.shape(out)[0], W * W])
+            #a generator trained under mixed precision emits float16; the band
+            #is summed in float32 regardless, since up to windowSize windows
+            #land on the same cell
+            tri = tf.cast(tf.gather(out, flatWindow, axis=1), tf.float32)
+            idx = flatBase[tf.newaxis, :] + offsets[:, tf.newaxis]
+            band.scatter_nd_add(tf.reshape(idx, [-1, 1]), tf.reshape(tri, [-1]))
+
+        pos = 0
+        usedStarts = []
+        for batch in test_ds:
+            input_data = HiCGAN._inputFromBatch(batch)
+            n = int(input_data.shape[0])
+            if starts is None:
+                offsets = np.arange(pos, pos + n, dtype=np.int32) + flanking
+            else:
+                if pos + n > starts.shape[0]:
+                    raise ValueError(
+                        "more samples in the dataset ({:d}+) than window starts ({:d})".format(
+                            pos + n, starts.shape[0]))
+                offsets = starts[pos:pos + n] + flanking
+            #a window at offset j writes columns j .. j+W-1; past the end of the
+            #chromosome the flat scatter would wrap into the next diagonal
+            #instead of failing, so it is checked rather than trusted
+            if int(offsets.max()) + W > matrixSize:
+                raise ValueError(
+                    "window at {:d} exceeds the {:d} bins of the chromosome".format(
+                        int(offsets.max()), matrixSize))
+            usedStarts.append(offsets)
+            _step(input_data, tf.convert_to_tensor(offsets))
+            pos += n
+        if starts is not None and pos != starts.shape[0]:
+            print("Warning: predicted {:d} windows but {:d} starts were given".format(
+                pos, starts.shape[0]), flush=True)
+        result = band.numpy().reshape(W, matrixSize)
+        del band
+        allStarts = (np.concatenate(usedStarts) if usedStarts
+                     else np.zeros(0, dtype=np.int32))
+        return result, allStarts
+
     @tf.function
     def predictionStep(self, input_batch, training=False):
         return self.generator(input_batch, training=training)
