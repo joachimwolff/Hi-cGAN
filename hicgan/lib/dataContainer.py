@@ -111,16 +111,27 @@ class DataContainer():
                 tmpArray = utils.scaleArray(tmpArray)
             return tmpArray
 
+        #The row a track is written to is its position in the sorted file list,
+        #not the order in which its thread happened to finish. as_completed()
+        #yields in completion order, so enumerating it and using that index put
+        #each track in whichever row it won the race for: with two or more
+        #bigwig files the channel order of FactorDataArray varied from run to
+        #run, and within a run from chromosome to chromosome, while
+        #self.factorNames stayed sorted. The log line named the wrong file for
+        #the same reason.
+        results = [None] * len(bigwigFileList)
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = [executor.submit(process_bigwig_file, bigwigFile) for bigwigFile in bigwigFileList]
-            for i, future in enumerate(concurrent.futures.as_completed(futures)):
-                tmpArray = future.result()
-                self.FactorDataArray[i] = tmpArray
-                nr_nonzero_abs = np.count_nonzero(tmpArray)
-                nr_nonzero_perc = nr_nonzero_abs / tmpArray.size * 100
-                msg2 = "{:s} - min. {:.3f} - max. {:.3f} - nnz. {:d} ({:.2f}%)"
-                msg2 = msg2.format(bigwigFileList[i], tmpArray.min(), tmpArray.max(), nr_nonzero_abs, nr_nonzero_perc)
-                featLoadedMsgList.append(msg2)
+            futureToIndex = {executor.submit(process_bigwig_file, bigwigFile): i
+                             for i, bigwigFile in enumerate(bigwigFileList)}
+            for future in concurrent.futures.as_completed(futureToIndex):
+                results[futureToIndex[future]] = future.result()
+        for i, tmpArray in enumerate(results):
+            self.FactorDataArray[i] = tmpArray
+            nr_nonzero_abs = np.count_nonzero(tmpArray)
+            nr_nonzero_perc = nr_nonzero_abs / tmpArray.size * 100
+            msg2 = "{:s} - min. {:.3f} - max. {:.3f} - nnz. {:d} ({:.2f}%)"
+            msg2 = msg2.format(bigwigFileList[i], tmpArray.min(), tmpArray.max(), nr_nonzero_abs, nr_nonzero_perc)
+            featLoadedMsgList.append(msg2)
         self.FactorDataArray = np.transpose(self.FactorDataArray)
         print(msg + "\n".join(featLoadedMsgList))
             
