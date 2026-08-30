@@ -12,7 +12,7 @@ Hi-cGAN was created in 2020/2021 as part of a master thesis at Albert-Ludwigs un
 
 ## Installation
 
-Hi-cGAN has been designed for Linux operating systems (tested under Ubuntu 24.04 and Rocky Linux 9). Other operating systems are not supported and probably won't work.
+Hi-cGAN has been designed for Linux operating systems (tested under Ubuntu 24.04). Other operating systems are not supported and probably won't work.
 
 Clone this repository and install it into an empty environment:
 
@@ -63,6 +63,67 @@ The basic file names must be the same as for training.
 See example usage for details.
 
 Any one-dimensional signal stored as bigwig can be used, and several tracks are combined by placing them in one folder.
+
+## Performance
+
+Accuracy was measured on GM12878, trained on the odd chromosomes with chromosome 19 held back for validation, and scored on the twelve held-out chromosomes against the measured matrices of [Rao et al.](https://doi.org/10.1016/j.cell.2014.11.021) at the fixed epoch 100. The input is the combination that won a validation-chromosome search at that bin size.
+
+bin size | input tracks | window | HiCRep SCC | GenomeDISCO | HiC-Spector | insulation r
+---------|--------------|--------|------------|-------------|-------------|-------------
+25 kb | H3K27ac, CTCF | 256 | 0.586 | 0.735 | 0.568 | 0.749
+10 kb | CTCF, H3K4me2 | 512 | 0.623 | 0.709 | 0.598 | 0.785
+5 kb | RAD21, H3K4me3, SMC3 | 512 | 0.643 | 0.665 | 0.478 | 0.750
+
+Per chromosome the SCC ranges from 0.486 to 0.751 at 25 kb, 0.539 to 0.751 at 10 kb and 0.538 to 0.750 at 5 kb; chromosome 14 scores highest under nearly every measure, chromosomes 16, 20 and X lowest. On the chromosomes the models were trained on the same measure gives 0.683, 0.770 and 0.773, and that gap is memorisation.
+
+At 2 kb, on the 411 held-out windows of Akita, the mean per-window correlation is 0.238 against Akita's 0.506, with Hi-cGAN matching or exceeding it on 40 of them.
+
+Predicting a cell type the model never saw costs about 0.12 SCC, 0.600 against 0.716 across five cell types.
+
+Which track carries the signal depends on the resolution: CTCF and the cohesin subunits RAD21 and SMC3 at 5 to 10 kb, active histone marks at 25 kb. Two input tracks are usually enough; adding a third rarely helps.
+
+Boundaries and loops called from the predicted maps agree considerably less well than the matrix-level scores suggest, so the maps are suited to domain-scale description rather than to boundary or loop calling.
+
+### Training cost
+
+Median minutes per epoch, recovered from checkpoint timestamps, including validation and checkpointing. Single-GPU runs used one Nvidia A100 with 40 GB of VRAM.
+
+bin size | window | GPUs | min/epoch | 100 epochs
+---------|--------|------|-----------|-----------
+25 kb | 64 | 1 | 1.0 | 1.7 h
+25 kb | 128 | 1 | 1.8 | 3.0 h
+25 kb | 256 | 1 | 4.2 | 7.0 h
+10 kb | 128 | 1 | 4.1 | 6.8 h
+10 kb | 512 | 1 | 40.5 | 67.5 h
+5 kb | 512 | 1 | 89.5 | 149.1 h
+2 kb | 512 | 8 | 31.0 | 51.6 h
+
+### Prediction cost
+
+Whole genome, chromosomes 1 to 22 and X, on a single Nvidia RTX 4090. Only the predict step uses the GPU, so the three steps can be queued as separate jobs. Peak VRAM is set by the largest chromosome rather than by the genome, so every resolution here fits on a card with 8 GB.
+
+bin size | window | prepare | predict | fold | total | RAM | VRAM
+---------|--------|---------|---------|------|-------|-----|-----
+25 kb | 64 | 0.2 | 1.1 | 0.1 | 1.4 min | 1.9 GB | 2.5 GB
+10 kb | 512 | 0.9 | 11.7 | 1.3 | 13.9 min | 2.9 GB | 4.5 GB
+5 kb | 512 | 1.9 | 23.5 | 2.8 | 28.1 min | 3.7 GB | 4.5 GB
+2 kb | 512 | 1.7 | 37.2 | 6.6 | 45.5 min | 7.8 GB | 6.5 GB
+
+## Trained models and data
+
+Everything is deposited at [10.5281/zenodo.11402891](https://doi.org/10.5281/zenodo.11402891), as seven archives.
+
+archive | size | contents
+--------|------|---------
+02_best_models.tar.gz | 2.1 GB | the generator and the whole-genome prediction for each bin size, that is H3K27ac with CTCF at 25 kb, CTCF with H3K4me2 at 10 kb, RAD21 with H3K4me3 and SMC3 at 5 kb, and the 2 kb model. Start here to predict with a trained model
+01_core.tar.gz | 4.0 GB | analysis code, all harvested scores, the figures and tables, the processed input tracks and measured matrices, and the predictions of the compared methods
+03_sweep_2kb.tar.gz | 1.9 GB | the 2 kb predictions on Akita's test regions
+04_sweep_5kb.tar.gz | 39 GB | the 5 kb factor search, models and predicted matrices
+05_sweep_10kb.tar.gz | 32 GB | the 10 kb factor search and the cross-cell-type predictions
+06_sweep_25kb.tar.gz | 17 GB | the 25 kb factor search, cross-cell-type predictions and the adversarial ablation
+07_epoch_scan_25kb.tar.gz | 28 GB | checkpoints every tenth epoch to 100 and every hundredth to 1000, for the fourteen single-factor runs at 25 kb
+
+Each archive expands to one directory with a `MANIFEST.csv` listing every file with its size and checksum, and a `README.md` describing the record. The measured Hi-C and the chromatin sequencing data are public and are cited by accession in `DATA_SOURCES.md`; what is deposited is the processed form used here.
 
 ## Usage
 
