@@ -115,13 +115,34 @@ Everything is deposited at [10.5281/zenodo.11402891](https://doi.org/10.5281/zen
 
 archive | size | contents
 --------|------|---------
-02_best_models.tar.gz | 2.1 GB | the generator and the whole-genome prediction for each bin size, that is H3K27ac with CTCF at 25 kb, CTCF with H3K4me2 at 10 kb, RAD21 with H3K4me3 and SMC3 at 5 kb, and the 2 kb model. Start here to predict with a trained model
+02_best_models.tar.gz | 2.3 GB | the generator and the whole-genome prediction for each bin size, that is H3K27ac with CTCF at 25 kb, CTCF with H3K4me2 at 10 kb, RAD21 with H3K4me3 and SMC3 at 5 kb, and the 2 kb model. Start here to predict with a trained model
 01_core.tar.gz | 4.0 GB | analysis code, all harvested scores, the figures and tables, the processed input tracks and measured matrices, and the predictions of the compared methods
-03_sweep_2kb.tar.gz | 1.9 GB | the 2 kb predictions on Akita's test regions
+03_sweep_2kb.tar.gz | 2.2 GB | the 2 kb predictions on Akita's test regions
 04_sweep_5kb.tar.gz | 39 GB | the 5 kb factor search, models and predicted matrices
 05_sweep_10kb.tar.gz | 32 GB | the 10 kb factor search and the cross-cell-type predictions
 06_sweep_25kb.tar.gz | 17 GB | the 25 kb factor search, cross-cell-type predictions and the adversarial ablation
 07_epoch_scan_25kb.tar.gz | 28 GB | checkpoints every tenth epoch to 100 and every hundredth to 1000, for the fourteen single-factor runs at 25 kb
+
+### The model files
+
+Checkpoints are named `generator_000NN.keras`, where `NN` is the zero-based epoch, so `generator_00099.keras` is the state after the 100th epoch, which is the fixed budget every number above was read at. Only generators are deposited; the discriminator is needed for training, not for prediction. Inside `02_best_models.tar.gz`:
+
+file | bin size | window | input tracks
+-----|----------|--------|-------------
+`03_models_headline/gm12878_sweeps/5kb/best_plus_two/generator_00099.keras` | 5 kb | 512 | RAD21, H3K4me3, SMC3
+`03_models_headline/gm12878_sweeps/10kb/best_plus_one/generator_00099.keras` | 10 kb | 512 | CTCF, H3K4me2
+`04_models_full_sweep/gm12878_sweeps/25kb/best_plus_one/H3K27ac_CTCF_gm12878_odd_chr_w256/generator_00099.keras` | 25 kb | 256 | H3K27ac, CTCF
+`03_models_headline/akita_normalised_2kb_epoch100/generator_00099.keras` | 2 kb | 512 | CTCF, hg38, trained on Akita's normalized target
+`03_models_headline/akita_normalised_2kb/generator_00019.keras` | 2 kb | 512 | the earlier 20-epoch run of the same configuration
+
+The 5, 10 and 25 kb models were trained on the odd chromosomes of GM12878. The 2 kb models follow Akita's split instead, which holds out windows rather than chromosomes, so they train on all chromosomes except the validation chromosome 19 with Akita's held-out windows excluded. The window and the bin size are properties of the checkpoint and must be passed to `hicPredict` unchanged, for instance for the 10 kb model:
+
+```
+hicPredict -trm generator_00099.keras -tcp ./features_CTCF_H3K4me2/ \
+           -pc "2 4 6 8" -b 10000 -ws 512 -o ./predictions
+```
+
+The folder given to `-tcp` must hold exactly the tracks the model was trained on, under the same base names. Alongside each generator the archive carries that model's whole-genome prediction, `training_odd_gm12878_pred_all_chromosomes_L1_gen_00099_<factors>.cool`, so the output can be compared against the deposited one.
 
 Each archive expands to one directory with a `MANIFEST.csv` listing every file with its size and checksum, and a `README.md` describing the record. The measured Hi-C and the chromatin sequencing data are public and are cited by accession in `DATA_SOURCES.md`; what is deposited is the processed form used here.
 
