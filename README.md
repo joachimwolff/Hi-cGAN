@@ -12,30 +12,43 @@ Hi-cGAN was created in 2020/2021 as part of a master thesis at Albert-Ludwigs un
 
 ## Installation
 
-Hi-cGAN has been designed for Linux operating systems (tested under Ubuntu 20.04 and CentOS 7.9.2009). Other operating systems are not supported and probably won't work.
+Hi-cGAN has been designed for Linux operating systems (tested under Ubuntu 24.04 and Rocky Linux 9). Other operating systems are not supported and probably won't work.
 
-Simply `git clone` this repository into an empty folder of your choice.
-It is recommended to use conda or another package manager to install
-the following dependencies into an empty environment:
+Clone this repository and install it into an empty environment:
+
+```
+git clone https://github.com/joachimwolff/Hi-cGAN.git
+cd Hi-cGAN
+pip install .
+```
+
+The installation provides five commands: `hicTraining`, `hicPredict`, `hicComputeCorrelation`, `hicOptimizer` and `hicScoring`. All of them accept `--version`.
+
+The stack the released results were produced with:
+
 dependency | tested version
 -----------|---------------
-click | 7.1.2
-cooler | 0.8.10
-graphviz | 2.42.3
-matplotlib | 3.3.2
-numpy | 1.19.4
-pandas | 1.1.4
-pybigwig | 0.3.17
-pydot | 1.4.1
-python | 3.7.8
-scikit-learn | 0.23.2
-scipy | 1.5.3
-tensorflow-gpu | 2.2.0   
-tqdm | 4.50.2
+python | 3.11.9
+tensorflow | 2.15.0
+keras | 2.15.0
+cooler | 0.10.3
+h5py | 3.11.0
+numpy | 1.26.4
+pandas | 2.2.2
+pyBigWig | 0.3.22
+scipy | 1.14.0
+scikit-learn | 1.6.1
+matplotlib | 3.8.4
+hicmatrix | 17.2
+tqdm | 4.66.4
 
-Other versions *might* work, but are untested and might cause dependency
-conflicts. Updating to tensorflow 2.3.x should be possible but has not been tested. Using tensorflow without GPU support is possible, but will be very slow and is thus not recommended. 
+Other versions might work but are untested. A CUDA capable GPU is needed for training.
 
+Models are saved in the Keras v3 format (`generator_00099.keras`). Loading one requires `safe_mode=False`, because the architecture contains a Lambda layer:
+
+```
+model = keras.models.load_model("generator_00099.keras", compile=False, safe_mode=False)
+```
 
 ## Input data requirements
 * Hi-C matrix / matrices in cooler format for training.   
@@ -49,264 +62,158 @@ but of course for the cell line to be predicted.
 The basic file names must be the same as for training.
 See example usage for details.
 
+Any one-dimensional signal stored as bigwig can be used, and several tracks are combined by placing them in one folder.
 
 ## Usage
-Hi-cGAN consists of two python scripts, training.py and predict.py,
-which will be explained below.
 
 ### Training
-This script will train the cGAN Generator and Discriminator
-by alternately updating their weights using the Adam optimizer.
-Here, the generator features a combined loss function (L1/L2 loss, adversarial loss, TV Loss) and the discriminator is using standard binary cross entropy loss.  
 
-Hi-cGAN is using a sliding window approach to generate training samples (and test samples, too) from Hi-C matrices and chromatin features on a per-chromosome basis, as proposed by [Farré et al.](https://doi.org/10.1186/s12859-018-2286-z). The most important parameters here are the window size (64, 128 or 256) and the bin size of the Hi-C matrix (e.g. 5kbp, 10kbp, 25kbp).
+`hicTraining` trains generator and discriminator by alternately updating their weights with the Adam optimizer. The generator uses a combined loss (L1 or L2 pixel loss, adversarial loss, total variation loss) and the discriminator standard binary cross entropy.
 
-Synopsis: `python training.py [parameters and options]`  
-Parameters / Options:  
-- --trainmatrices | -tm 
-  - required  
-  - Hi-C matrices for training 
-  - must be in cooler format 
-  - use this option multiple times to specify more than one matrix (e.g. `-tm matrix1.cool -tm matrix2.cool`)
-  - first matrix belongs to first training chromatin feature path and so on, see below
-- --trainChroms | -tchroms 
-  - required  
-  - chromosomes for training
-  - specify without leading "chr" and separated by spaces,
-e.g. "1 3 5 11" 
-  - these chromosomes must be present in all train matrices
-- --trainChromPaths | -tcp 
-  - required
-  - path where chromatin features for training reside
-  - program will look for bigwig files in this folder, subfolders are not considered
-  - file extension must be "bigwig", "bigWig" or "bw"
-  - specify one trainChromPath for each training matrix, in the desired order
-  - chromatin features for training and prediction must have the same base names 
-- --valMatrices | -vm 
-  - required  
-  - Hi-C matrices for validation
-  - must be in cooler format. 
-  - use this option multiple times to specify more than one matrix
-- --valChroms | -vchroms 
-  - required  
-  - same as trainChroms, just for validation
-- --valChromPaths | -vcp 
-  - required
-  - same as trainChromPaths, just for validation
-- --windowsize | -ws  
-  - required
-  - window size in bins for submatrices in sliding window approach 
-  - choose from 64, 128, 256 
-  - default: 64
-  - choose reasonable value according to matrix bin size
-  - if the matrix has a bin size of 5kbp, then a windowsize of 64 corresponds to an actual windowsize of 64*5kbp = 320kbp
-- --outfolder | -o 
-  - required
-  - folder where output will be stored
-  - must be writable and have several 100s of MB of free storage space
-- --epochs | -ep 
-  - required
-  - number of epochs for training 
-- --batchsize | -bs 
-  - required  
-  - batch size for training
-  - integer between 1 and 256
-  - default: 32 
-  - mind the memory limits of your GPU
-  - in a test environment with 15GB GPU memory, batchsizes 32,4,2 were safely within limits for windowsizes 64,128,256, respectively
-- --lossWeightPixel | -lwp 
-  - optional 
-  - loss weight for the L1 or L2 loss in the generator
-  - float >= 1e-10
-  - default: 100.0 
-- --lossWeightDisc | -lwd  
-  - optional
-  - loss weight for the discriminator error
-  - float >= 1e-10
-  - default: 0.5
-- --lossTypePixel | -ltp 
-  - optional 
-  - type of per-pixel loss to use for the generator
-  - choose from "L1" (mean abs. error) or "L2" (mean squared error)
-  - default: L1
-- --lossWeightTv | -lwt 
-  - optional 
-  - loss weight for Total-Variation-loss of generator
-  - float >= 0.0
-  - default: 1e-10
-  - higher value - more smoothing
-- --lossWeightAdv | -lwa   
-  - optional
-  - loss weight for adversarial loss in the generator
-  - float >= 1e-10
-  - default: 1.0
-- --learningRateGen | -lrg  
-  - optional
-  - learning rate for the Adam optimizer of the generator
-  - float in 1e-10...1.0
-  - default: 2e-5
-- --learningRateDisc | -lrd
-  - optional
-  - learning rate for the Adam optimizer of the discriminator
-  - float in 1e-10...1.0
-  - default: 1e-6
-- --beta1 | -b1
-  - optional 
-  - beta1 parameter for the Adam optimizers (generator and discriminator)
-  - float in 1e-2...1.0  
-  - default 0.5.
-- --flipsamples | -fs 
-  - optional
-  - flip training matrices and chromatin features (data augmentation)
-  - boolean
-  - default: False
-- --embeddingType | -emb 
-  - optional  
-  - type of embedding to use for generator and discriminator
-  - choose from 'CNN' (convolutional neural network), 'DNN' (dense neural network by [Farré et al.](https://doi.org/10.1186/s12859-018-2286-z)), or 'mixed' (Generator - CNN, Discriminator - DNN)
-  - default: CNN
-  - CNN is recommended
-- --pretrainedIntroModel | -ptm
-  - optional  
-  - undocumented, developer use only
-- --figuretype | -ft  
-  - optional
-  - figure type for all plots
-  - choose from png, pdf, svg 
-  - default: png
-- --recordsize | -rs
-  - optional
-  - approx. size (number of samples) of the tfRecords used in the data pipeline for training
-  - can be tweaked to balance the load between RAM / GPU / CPU
-  - integer >= 10
-  - default: 2000
-- --plotFrequency | -pfreq
-  - optional
-  - update and save loss over epoch plots after this number of epochs 
-  - integer >= 1
-  - default: 10
+Training samples are generated per chromosome with a sliding window over the Hi-C matrix and the chromatin features, as proposed by [Farré et al.](https://doi.org/10.1186/s12859-018-2286-z). The two parameters that decide what a model can see are the window size and the bin size of the matrix: a window of `w` at a bin size of `b` reaches `w * b` base pairs from the diagonal, and the model cannot predict the last `w` bins of a chromosome.
 
-Returns: 
-* The following files will be stored in the chosen output path (option `-o`) 
-* Trained models of generator and discriminator in h5py format, stored in output path (every `-pfreq` epochs and after completion).
-* Sample images of generated Hi-C matrices (every 5 epochs).
-* Parameter file in csv format for reference.
-* (temporary) Tensorflow TFRecord files containing serialized train samples. Do not touch these files while the program is running, they should be open for reading anyway and will be deleted automatically upon completion.
+Synopsis: `hicTraining [parameters and options]`
 
+Required:
+
+parameter | short | meaning
+----------|-------|--------
+--trainingMatrices | -tm | Hi-C matrices for training, cooler format. Repeat the option for more than one matrix; the first matrix belongs to the first training chromatin folder and so on
+--trainingChromosomes | -tchroms | chromosomes for training, without leading "chr" and separated by spaces, e.g. "1 3 5 11". Must be present in all training matrices
+--trainingChromatinFolders | -tcp | folder holding the bigwig files for training, one folder per training matrix, in the same order. Subfolders are not considered
+--validationMatrices | -vm | matrices for validation, same rules as --trainingMatrices
+--validationChromosomes | -vchroms | chromosomes for validation. Should not intersect the training chromosomes
+--validationChromatinFolders | -vcp | chromatin folders for validation
+--windowSize | -ws | window size in bins, 64, 128 or 256
+--outputFolder | -o | output folder, must be writable
+--epochs | -ep | number of epochs
+
+Optional, the network and its losses:
+
+parameter | short | default | meaning
+----------|-------|---------|--------
+--batchSize | -bs | 32 | batch size. With `--multiGPUTraining` this is the GLOBAL batch and is split across replicas
+--lossWeightPixel | -lwp | 100.0 | weight of the L1 or L2 loss in the generator
+--lossWeightDiscriminator | -lwd | 0.5 | weight of the discriminator error
+--lossTypePixel | -ltp | L1 | per pixel loss, "L1" or "L2"
+--lossWeightTV | -lwt | 1e-10 | weight of the total variation loss, higher means smoother
+--lossWeightAdversarial | -lwa | 1.0 | weight of the adversarial loss in the generator
+--learningRateGenerator | -lrg | 2e-5 | learning rate of the generator's Adam optimizer
+--learningRateDiscriminator | -lrd | 1e-6 | learning rate of the discriminator's Adam optimizer
+--beta1 | -b1 | 0.5 | beta1 of both Adam optimizers
+--flipSamples | -fs | off | flip matrices and features as data augmentation
+
+Optional, what enters training:
+
+parameter | short | default | meaning
+----------|-------|---------|--------
+--minTargetCoverage | -mtc | 0.0 | drop every sample whose target window has a smaller fraction of covered bins than this. Without it a gap in the matrix becomes a block of zeros the model learns to reproduce
+--excludeRegions | -exr | none | BED file or files; every sample whose target window overlaps one of these regions is dropped. Use it to hold regions out deliberately, for instance another method's test set
+--noScaleNorm | -nsn | off | do not scale the chromatin features to the 0 to 1 range
+--scaleTargetToUnitRange | -stur | off | map the targets onto [0, 1] using the range measured from the training targets, and write that range to `target_value_range.json` so `hicPredict` can invert it
+--targetValueRange | -tvr | none | apply the mapping at read time for records written without it. Takes the path to `target_value_range.json`, `"min,max"`, or `"auto"`
+--seed | -sd | none | seed for the Python, NumPy and TensorFlow generators. Set it to repeat a run, vary it for independent runs of one configuration
+
+Optional, how it runs:
+
+parameter | short | default | meaning
+----------|-------|---------|--------
+--multiGPUTraining | -mgpu | off | train on every visible GPU with MirroredStrategy
+--whichGPU | -wgpu | 1 | which GPU to use in the single GPU case, one based
+--mixedPrecision | -mp | off | float16 training, faster and smaller on the GPU, no effect on system RAM
+--createDataOnly | -cdo | off | write the TFRecords and exit. Needs no GPU
+--trainOnly | -to | off | train from existing TFRecords in the output folder
+--threads | -t | 4 | threads for writing TFRecords
+--recordSize | -rs | 2000 | approximate number of samples per TFRecord file
+--keepTFRecords | -k | off | do not delete the TFRecords after training
+--resume | -r | off | resume from the newest checkpoint in the output folder
+--saveMemory | -sm | off | do not hold all data in memory at once
+--validationSteps | -vs | 0 | evaluate only this many validation batches per epoch, 0 means all
+--plotFrequency | -pfreq | 10 | update the loss plots every this many epochs
+--figureFileFormat | -ft | png | png, pdf or svg
+
+Returns, in the folder given by `-o`:
+* generator and discriminator in Keras v3 format, written every `-pfreq` epochs and after the last epoch
+* sample images of generated Hi-C matrices
+* a parameter file in csv format
+* the TFRecords, deleted after training unless `--keepTFRecords` is given
+
+Because `--createDataOnly` needs no GPU and `--trainOnly` reads what it wrote, a run can be split into a CPU job that prepares the data and a GPU job that trains on it, both pointed at one output folder.
 
 ### Predict
-This script will predict Hi-C matrices using chromatin features and a trained generator model as input.  
 
-Synopsis: `python predict.py [parameters and options]`  
-Parameters / Options:  
-- --trainedModel | -trm 
-  - required
-  - trained generator model to predict from, h5py format
-  - generated by training.py above
-- --testChromPath | -tcp 
-  - required
-  - Same as trainChromPaths, just for testing / prediction
-  - number and base names of bigwig files in this path must be the same as for training
-- --testChroms | -tchroms
-  - required
-  - chromosomes for testing (to be predicted) 
-  - must be available in all bigwig files
-  - input format: without "chr" and separated by spaces, e.g. "8 12 21"
-- --outfolder | -o
-  - required
-  - output path for predicted Hi-C matrices (in cooler format)
-  - default: current path
-- --multiplier | -mul 
-  - optional
-  - multiplier for better visualization of results
-  - integer >= 1
-  - default: 1000 
-- --binsize | -b 
-  - required
-  - bin size for binning the proteins
-  - usually equal to binsize for training (but not mandatory)
-  - integer >= 1000
-* --batchsize | -bs
-  - optional
-  - batch size for prediction
-  - same considerations as for training.py hold
-  - integer >= 1
-  - default: 32
-- --windowsize | -ws  
-  - required
-  - window size for prediction
-  - choose from 64, 128, 256
-  - must be the same as for training
-  - could in future be detected from trained model
-  - for now, just enter the appropriate value
+`hicPredict` predicts a Hi-C matrix from chromatin features and a trained generator.
 
-Returns:  
-* Predicted matrix in cooler format, defined for the specified test chromosomes.  
-* Parameter file in csv format for reference.  
-* (temporary) Tensorflow TFRecord files containing serialized prediction samples. Do not touch these files while the program is running, they should be open for reading anyway and will be deleted automatically upon completion.
+Synopsis: `hicPredict [parameters and options]`
+
+parameter | short | default | meaning
+----------|-------|---------|--------
+--trainedModel | -trm | | the generator written by `hicTraining`
+--predictionChromosomesFolders | -tcp | | folder with the bigwig files to predict from. Number and base names must match training
+--predictionChromosomes | -pc | | chromosomes to predict, without "chr" and separated by spaces
+--binSize | -b | | bin size for binning the chromatin features. This is the resolution of the prediction
+--windowSize | -ws | | window size, must be the one the model was trained with
+--outputFolder | -o | ./ | output folder
+--matrixOutputName | -mn | predMatrix.cool | name of the predicted cooler
+--parameterOutputFile | -pf | predParams.csv | name of the parameter file
+--batchSize | -bs | 32 | batch size
+--multiplier | -mul | 10 | scaling applied to the predicted cooler
+--targetValueRange | -tvr | none | undo the [0, 1] mapping so the prediction comes back in the target's units. Path to `target_value_range.json` or `"min,max"`
+--includeRegions | -ir | none | BED file or files; predict only the window positions whose target lies entirely inside these regions
+--mode | -m | all | `create-data` (CPU only), `predict` (needs a GPU), `make-matrix`, or `all`
+--rebuildProcesses | -rp | 0 | how many chromosomes to rebuild at once, 0 picks a number from free memory and core count
+--saveMemory | -sm | off | memory saving mode
+--numberOfBatches | -nb | 20 | batches to split the prediction into when `--saveMemory` is set
+--whichGPU | -wgpu | 1 | which GPU to use, one based
+
+Returns the predicted matrix in cooler format for the requested chromosomes, and a parameter file. The values are scaled for display by `--multiplier`; with `--targetValueRange` they are written back in the value range of the training target, so the result is an ordinary cooler.
 
 ### Example usage
-Assume Hi-C and chromatin feature data is available for cell_line1,
-and the same chromatin feature is also available for cell_line2.
-Then Hi-cGAN can be trained on data from cell_line1 to predict
-cell_line2's (unknown) Hi-C matrix.
+
+Hi-C and chromatin features are available for cell_line1, and the same features for cell_line2. Hi-cGAN is trained on cell_line1 to predict the unknown matrix of cell_line2.
+
 ```
 #following folder structure is assumed
-#./
-#./cell_line1/
-#./cell_line1/feature1.bigwig
-#./cell_line1/feature2.bigwig
-#./cell_line1/feature3.bigwig
-#./cell_line1/HiCmatrix.cool
-#./cell_line2/
-#./cell_line2/feature1.bigwig
-#./cell_line2/feature2.bigwig
-#./cell_line2/feature3.bigwig
+#./cell_line1/feature1.bigwig, feature2.bigwig, feature3.bigwig, HiCmatrix_25kb.cool
+#./cell_line2/feature1.bigwig, feature2.bigwig, feature3.bigwig
 #./trained_models/
 #./predictions/
 
-#training Hi-C matrix
-#assuming it has a 25kbp bin size
-tm="./cell_line1/HiCmatrix_25kb.cool"
-#training chromatin features
-tcp="./cell_line1/"
-#training chromosomes
-tchroms="1 5 10"
-#validation matrix, chromatin features and chromosome(s). 
-vm="./cell_line1/HiCmatrix.cool" #here, same as for training
-vcp="./cell_line1/" #here, same as for training
-vchroms="19" #here, should not intersect with training chromosomes
+tm="./cell_line1/HiCmatrix_25kb.cool"   #training matrix, 25 kbp bins
+tcp="./cell_line1/"                     #folder with the training features
+tchroms="1 3 5 7 9 11 13 15 17 21"      #training chromosomes
+vm="./cell_line1/HiCmatrix_25kb.cool"   #validation matrix, here the same file
+vcp="./cell_line1/"
+vchroms="19"                            #must not intersect the training chromosomes
 
-#train Hi-cGAN on data from cell_line1, 100 epochs 
-#this might take several hours to days, depending on hardware
-#GPU strongly recommended for windowsizes 128, 256
-#progress bars are provided for runtime estimation
-training.py -tm ${tm} -tcp ${tcp} -tchroms ${tchroms} -vm ${vm} -vcp ${vcp} -vchroms ${vchroms} -o ./trained_models -ep 100
+#train for 100 epochs with a window of 256, seeded so the run can be repeated
+hicTraining -tm ${tm} -tcp ${tcp} -tchroms ${tchroms} \
+            -vm ${vm} -vcp ${vcp} -vchroms ${vchroms} \
+            -ws 256 -ep 100 -bs 2 --seed 42 -o ./trained_models
 
-#the trained model with weights etc.
-#this file is generated by running training.py as shown above
-trm="./trained_models/generator_00099.h5"
-#the chromatin path for prediction
-tcp="./cell_line2/"
-#the chromosomes to be predicted
-tchroms="3 7 21"
-#the binsize of the target matrix
-#here, same as for training
-b="25000"
-#the windowsize of the target matrix
-#must be the same as for training
-ws="64"
+#predict cell_line2 with the trained generator
+hicPredict -trm ./trained_models/generator_00099.keras \
+           -tcp ./cell_line2/ -pc "2 4 6 8" \
+           -b 25000 -ws 256 -o ./predictions
 
-
-#now use the trained model from above to predict Hi-C matrix for cell line 2
-predict.py -trm ${trm} -tcp ${tcp} -tchroms ${tchroms} -o ./predictions -b ${b} -ws ${ws}
-
-#the prediction script often completes within a few minutes on recent hardware
-#after that, there's a file named ./predictions/predMatrix.cool
-#which holds the predicted Hi-C matrix (here, with chromosomes 3, 7 and 21)
-#e.g. plot the matrix 
-hicPlotMatrix -m ./predictions/predMatrix.cool --region 3:0-1000000 --log1p -o cell_line2_chr3_0000000-1000000.png
+#the result is ./predictions/predMatrix.cool
+hicPlotMatrix -m ./predictions/predMatrix.cool --region 2:0-1000000 --log1p -o cell_line2_chr2.png
 ```
+
+Splitting the same run over a CPU and a GPU job, both writing to one output folder:
+
+```
+hicTraining ... -o ./trained_models --createDataOnly --threads 16
+hicTraining ... -o ./trained_models --trainOnly --mixedPrecision
+```
+
+### Other commands
+
+`hicComputeCorrelation` compares a predicted matrix against a measured one, `hicOptimizer` searches hyperparameters, and `hicScoring` applies the scoring functions. Each is documented by its own `--help`.
+
+## Citation
+
+Hi-cGAN v1 is the version described in the article. The models, predictions, processed inputs and analysis code are deposited at [10.5281/zenodo.11402891](https://doi.org/10.5281/zenodo.11402891).
 
 ## Notes
 ### Creating bigwig files for chromatin features from BAM alignment files
