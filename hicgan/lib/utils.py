@@ -4,6 +4,8 @@ import cooler
 import pyBigWig
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.colors as colors
 from matplotlib.ticker import MultipleLocator
@@ -12,6 +14,10 @@ from scipy import sparse
 from sklearn import metrics as metrics
 import traceback
 
+
+import numpy as np
+from scipy import ndimage
+from scipy.sparse import csr_matrix, issparse
 import logging
 log = logging.getLogger(__name__)
 
@@ -114,6 +120,18 @@ def scaleArray(pArray):
         msg = "cannot normalize empty array"
         print(msg)
         return pArray
+    #A sparse matrix holding negative values cannot be shifted: scipy refuses to
+    #subtract a nonzero scalar because it would have to materialise every
+    #implicit zero. Say so here rather than letting the caller meet scipy's
+    #message, which does not hint at the cause or the cure.
+    if sparse.issparse(pArray) and pArray.min() < 0:
+        raise NotImplementedError(
+            "scaleArray cannot min-max a SPARSE matrix whose values go negative "
+            "(min {:.4g}). An Akita-style log observed/expected target is about "
+            "half negative. Use hicTraining --scaleTargetToUnitRange instead: it "
+            "measures the range once, maps the dense target window onto [0, 1], "
+            "and records the range so hicPredict --targetValueRange can invert "
+            "it.".format(float(pArray.min())))
     if pArray.max() - pArray.min() != 0:
         normArray = (pArray - pArray.min()) / (pArray.max() - pArray.min())
     elif pArray.max() > 0: #min = max >0
@@ -121,6 +139,90 @@ def scaleArray(pArray):
     else: #min=max <= 0
         normArray = np.zeros_like(pArray)
     return normArray
+
+def observedValueRange(pMatrixFilePaths, pChromosomes=None):
+    """Smallest and largest value actually present in the target matrices.
+
+    Measured, not assumed. The range is taken over the STORED entries only: an
+    absent entry in a sparse Hi-C matrix means "not observed", not "value zero",
+    and letting it into the range would drag the minimum to 0 for any target
+    whose real values are negative.
+
+    One range is computed across every training matrix and chromosome, and the
+    same one is then used everywhere. A per-chromosome range would map the same
+    physical value to a different target on chr1 than on chr2, so the model
+    would be chasing a target that moves between chromosomes.
+    """
+    vmin, vmax = np.inf, -np.inf
+    for path in ([pMatrixFilePaths] if isinstance(pMatrixFilePaths, str)
+                 else pMatrixFilePaths):
+        prefix = getChromPrefixCooler(path)
+        chroms = pChromosomes
+        if chroms is None:
+            chroms = [c.replace(prefix, "", 1) for c in getChromSizesFromCooler(path)]
+        for chrom in chroms:
+            name = prefix + str(chrom).replace(prefix, "", 1)
+            try:
+                M, _ = getMatrixFromCooler(path, name)
+            except Exception:
+                continue
+            if M is None:
+                continue
+            data = M.data if sparse.issparse(M) else np.asarray(M).ravel()
+            data = data[np.isfinite(data)]
+            if data.size == 0:
+                continue
+            vmin = min(vmin, float(data.min()))
+            vmax = max(vmax, float(data.max()))
+    if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax <= vmin:
+        msg = "could not determine a usable value range from the target matrices"
+        raise ValueError(msg)
+    return vmin, vmax
+
+
+def toUnitRange(pArray, pMin, pMax):
+    """Map a DENSE array from [pMin, pMax] onto [0, 1].
+
+    Dense on purpose. The same map on a sparse matrix would have to shift the
+    implicit zeros too, which scipy refuses ("subtracting a nonzero scalar from
+    a sparse array is not supported") -- the error that made the old
+    scaleArray() path unusable for any signed target. Target windows are
+    densified before use anyway, so the transform is applied there.
+    """
+    span = float(pMax) - float(pMin)
+    if span <= 0:
+        return np.zeros_like(pArray, dtype=float)
+    return np.clip((np.asarray(pArray, dtype=float) - float(pMin)) / span, 0.0, 1.0)
+
+
+def fromUnitRange(pMatrix, pMin, pMax):
+    """Inverse of toUnitRange: [0, 1] back to [pMin, pMax], the real units.
+
+    On a sparse matrix only the STORED values are mapped. That is deliberate:
+    an unstored pixel was never predicted, and giving it pMin would invent a
+    maximally depleted contact everywhere the model said nothing.
+    """
+    span = float(pMax) - float(pMin)
+    if sparse.issparse(pMatrix):
+        out = pMatrix.copy().astype(np.float64)
+        out.data = out.data * span + float(pMin)
+        return out
+    return np.asarray(pMatrix, dtype=float) * span + float(pMin)
+
+
+def saveValueRange(pPath, pMin, pMax):
+    import json
+    with open(pPath, "w") as fh:
+        json.dump({"min": float(pMin), "max": float(pMax)}, fh, indent=1)
+    log.info("wrote target value range [%g, %g] to %s", pMin, pMax, pPath)
+
+
+def loadValueRange(pPath):
+    import json
+    with open(pPath) as fh:
+        d = json.load(fh)
+    return float(d["min"]), float(d["max"])
+
 
 def showMatrix(pMatrix):
     #test function to show matrices
@@ -290,11 +392,94 @@ def plotLoss(pGeneratorLossValueLists, pDiscLossValueLists, pGeneratorLossNameLi
 #     log.info("Matrix rebuilding complete. Mean matrix shape: %s", mean_matrix.shape)
 #     return mean_matrix
 
-def rebuildMatrix(pArrayOfTriangles, pWindowSize, pFlankingSize=None, pMaxDist=None, pStepsize=1):
+def bandToCsr(pBandSum, pStartCount, pWindowSize, pMatrixSize):
+    """Turn an accumulated band into the mean matrix, as CSR.
+
+    pBandSum holds, for every cell of the rebuilt matrix, the sum of the
+    contributions of all windows covering it, laid out as (pWindowSize,
+    pMatrixSize) indexed by [offset-from-diagonal, row]. pStartCount is how many
+    windows start at each position.
+
+    The divisor is never stored. How many windows cover a cell follows from the
+    start positions alone: a cell on diagonal d at row p is covered by the
+    windows starting in [p - (W-1-d), p], which one prefix sum answers for every
+    cell at once.
+    """
+    W = int(pWindowSize)
+    matrix_size = int(pMatrixSize)
+    band_sum = np.asarray(pBandSum).reshape(W, matrix_size)
+    cum = np.zeros(matrix_size + 1, dtype=np.int64)
+    np.cumsum(np.asarray(pStartCount, dtype=np.int64), out=cum[1:])
+
+    def _coverage(pDiagonal):
+        """How many windows cover each row of diagonal pDiagonal."""
+        k = W - 1 - pDiagonal
+        if k == 0:
+            shifted = cum[:matrix_size]
+        else:
+            shifted = np.concatenate((np.zeros(k, dtype=np.int64),
+                                      cum[:matrix_size - k]))
+        return cum[1:] - shifted
+
+    # The CSR is filled directly rather than going through COO. A COO built
+    # from the band would hold a second full copy of the values plus two
+    # index arrays, and .tocsr() would then allocate a third. Here the only
+    # arrays that ever exist are the band and the CSR itself. Within a row
+    # the diagonals are visited in increasing order, which is exactly CSR's
+    # required column order, so nothing has to be sorted either.
+    nnzPerRow = np.zeros(matrix_size, dtype=np.int32)
+    for dIdx in range(W):
+        nnzPerRow += (_coverage(dIdx) > 0) & (band_sum[dIdx] != 0)
+    indptr = np.zeros(matrix_size + 1, dtype=np.int64)
+    np.cumsum(nnzPerRow, out=indptr[1:])
+    del nnzPerRow
+    total = int(indptr[-1])
+    data = np.empty(total, dtype=np.float32)
+    indices = np.empty(total, dtype=np.int32)
+    running = np.zeros(matrix_size, dtype=np.int64)
+    for dIdx in range(W):
+        cov = _coverage(dIdx)
+        rowsHere = np.flatnonzero((cov > 0) & (band_sum[dIdx] != 0))
+        if rowsHere.size == 0:
+            continue
+        at = indptr[rowsHere] + running[rowsHere]
+        data[at] = band_sum[dIdx, rowsHere] / cov[rowsHere]
+        indices[at] = rowsHere + dIdx
+        running[rowsHere] += 1
+    del running, cum
+    return sparse.csr_matrix((data, indices, indptr),
+                             shape=(matrix_size, matrix_size),
+                             dtype=np.float32)
+
+
+def rebuildMatrix(pArrayOfTriangles, pWindowSize, pFlankingSize=None, pMaxDist=None, pStepsize=1, pSaveMemory=False, pWindowStarts=None, pMatrixSize=None, pProgress=True):
+    """Fold predicted upper triangles back into one chromosome matrix.
+
+    `pWindowStarts` is the sliding-window position each triangle came from. It
+    defaults to 0, 1, 2, ... which is right whenever every window position was
+    predicted. It is NOT right when the prediction was restricted to a subset of
+    positions (`--includeRegions`): triangle i then belongs at position
+    pWindowStarts[i], and assuming i would smear every prediction to the start
+    of the chromosome. `pMatrixSize` must be given with it, because the number
+    of triangles no longer determines the chromosome length.
+    """
     log.info("Rebuilding matrix from triangles with window size %d", pWindowSize)
     flankingSize = pFlankingSize if pFlankingSize is not None else pWindowSize
     nr_matrices = pArrayOfTriangles.shape[0]
-    matrix_size = nr_matrices - 1 + (pWindowSize + 2 * flankingSize)
+    if pWindowStarts is None:
+        windowStarts = np.arange(nr_matrices, dtype=np.int64)
+    else:
+        windowStarts = np.asarray(pWindowStarts, dtype=np.int64)
+        if windowStarts.shape[0] != nr_matrices:
+            raise ValueError(
+                "pWindowStarts has {:d} entries but there are {:d} triangles".format(
+                    windowStarts.shape[0], nr_matrices))
+    if pMatrixSize is not None:
+        matrix_size = int(pMatrixSize)
+    elif nr_matrices:
+        matrix_size = int(windowStarts.max()) + (pWindowSize + 2 * flankingSize)
+    else:
+        matrix_size = pWindowSize + 2 * flankingSize
 
     log.info(f"Number of triangles: {nr_matrices}, window size: {pWindowSize}, flanking size: {flankingSize}")
 
@@ -307,63 +492,294 @@ def rebuildMatrix(pArrayOfTriangles, pWindowSize, pFlankingSize=None, pMaxDist=N
 
     log.info(f"Stepsize set to {stepsize}")
 
-    rows_all, cols_all, vals_all = [], [], []
-    rows_count, cols_count, vals_count = [], [], []
-
-    for i in tqdm(range(0, nr_matrices, stepsize), desc="rebuilding matrix"):
-        j = i + flankingSize
-        k = j + pWindowSize
-
+    
+    if pSaveMemory:
+        # Band accumulator.
+        #
+        # The rebuilt matrix is banded by construction: a window of pWindowSize
+        # bins can never place a value further than pWindowSize - 1 off the
+        # diagonal. So the whole result fits in a dense (pWindowSize,
+        # matrix_size) float32 array indexed by [offset-from-diagonal, row],
+        # which for a human chromosome at 2 kb is a few hundred MB.
+        #
+        # The previous implementation accumulated COO blocks and folded each one
+        # into a running CSR pair with `pSum = pSum + block_sum`. That is
+        # quadratic in the number of blocks: the running matrix grows toward the
+        # full band, and every flush reallocated and re-merged tens of millions
+        # of entries that were already final. A chromosome took minutes, almost
+        # all of it in those two additions.
+        #
+        # Here each window is a single in-place scatter-add into a fixed-size
+        # buffer. Nothing grows, nothing is merged, and the sparse matrix is
+        # built exactly once at the end. The per-window indices are the same
+        # every time up to the offset j * pWindowSize, so they are computed once.
+        #
+        # The band is stored offset-major, [d, row] rather than [row, d],
+        # because that is the layout in which a window's contribution to one
+        # diagonal is contiguous. Only the flat scatter is used below, but the
+        # layout is what makes the final CSR assembly a single pass.
         if pMaxDist is None or pMaxDist == pWindowSize:
             r, c = np.triu_indices(pWindowSize)
         else:
             r, c = np.mask_indices(pWindowSize, maskFunc, pMaxDist)
+        r = r.astype(np.int64)
+        c = c.astype(np.int64)
+        entriesPerWindow = max(1, r.size)
+        W = int(pWindowSize)
 
-        rows = r + j
-        cols = c + j
+        # flat index into a (W, matrix_size) band: (c - r) picks the diagonal,
+        # r picks the position within it. Adding j * 1 shifts along the
+        # chromosome, so a window at j scatters to flatBase + j.
+        flatBase = (c - r) * matrix_size + r
+        log.info("Rebuilding %d windows into a %d x %d band (%d entries/window)",
+                 nr_matrices, W, matrix_size, entriesPerWindow)
 
-        tri = pArrayOfTriangles[i]
+        # Only the SUM is accumulated. The divisor never has to be stored:
+        # how many windows cover a cell depends on the window starts alone, and
+        # for a cell on diagonal d at row p it is the number of starts in
+        # [p - (W-1-d), p], which one prefix sum over the start positions
+        # answers for every cell at once. That removes an array the size of the
+        # band, and halves the work in the scatter loop.
+        band_sum = np.zeros(W * matrix_size, dtype=np.float32)
+        startCount = np.zeros(matrix_size, dtype=np.int32)
 
-        # --- FIX: handle 1D or 2D triangles ---
-        if tri.ndim == 1:
-            vals = tri
-        elif tri.ndim == 2:
-            vals = tri[r, c]
-        else:
-            raise ValueError(f"Unexpected triangle shape: {tri.shape}")
+        for i in tqdm(range(0, nr_matrices, stepsize), desc="rebuilding matrix", disable=not pProgress):
+            j = int(windowStarts[i]) + flankingSize
+            tri = pArrayOfTriangles[i]
+            vals = tri if tri.ndim == 1 else tri[r, c]
+            # every (row, offset) pair within one window is distinct, so a plain
+            # in-place add is correct here; np.add.at is not needed and is far
+            # slower
+            band_sum[flatBase + j] += vals
+            startCount[j] += 1
 
-        rows_all.append(rows)
-        cols_all.append(cols)
-        vals_all.append(vals)
+        mean_matrix = bandToCsr(band_sum, startCount, W, matrix_size)
+        del band_sum, startCount
+    else:
+        rows_all, cols_all, vals_all = [], [], []
+        rows_count, cols_count, vals_count = [], [], []
 
-        rows_count.append(rows)
-        cols_count.append(cols)
-        vals_count.append(np.ones_like(vals, dtype=np.int32))
+        for i in tqdm(range(0, nr_matrices, stepsize), desc="rebuilding matrix", disable=not pProgress):
+            j = int(windowStarts[i]) + flankingSize
+            k = j + pWindowSize
 
-    # Combine all updates in a single sparse build
-    rows_all = np.concatenate(rows_all)
-    cols_all = np.concatenate(cols_all)
-    vals_all = np.concatenate(vals_all)
-    rows_count = np.concatenate(rows_count)
-    cols_count = np.concatenate(cols_count)
-    vals_count = np.concatenate(vals_count)
+            if pMaxDist is None or pMaxDist == pWindowSize:
+                r, c = np.triu_indices(pWindowSize)
+            else:
+                r, c = np.mask_indices(pWindowSize, maskFunc, pMaxDist)
 
-    # Construct sparse sum and count matrices
-    sum_matrix = sparse.coo_matrix(
-        (vals_all, (rows_all, cols_all)), shape=(matrix_size, matrix_size), dtype=np.float64
-    ).tocsr()
-    count_matrix = sparse.coo_matrix(
-        (vals_count, (rows_count, cols_count)), shape=(matrix_size, matrix_size), dtype=np.int32
-    ).tocsr()
+            rows = r + j
+            cols = c + j
 
-    mean_matrix = sum_matrix.copy().astype(np.float32)
-    nonzero_mask = count_matrix.data != 0
-    mean_matrix.data[nonzero_mask] = sum_matrix.data[nonzero_mask] / count_matrix.data[nonzero_mask]
+            tri = pArrayOfTriangles[i]
 
-    result = mean_matrix.toarray()
+            # --- FIX: handle 1D or 2D triangles ---
+            if tri.ndim == 1:
+                vals = tri
+            elif tri.ndim == 2:
+                vals = tri[r, c]
+            else:
+                raise ValueError(f"Unexpected triangle shape: {tri.shape}")
 
-    log.info("Matrix rebuilding complete. Final matrix shape: %s", result.shape)
-    return result
+            rows_all.append(rows)
+            cols_all.append(cols)
+            vals_all.append(vals)
+            log.debug(f"Processed triangle {i}: added {len(vals)} values")
+
+            rows_count.append(rows)
+            cols_count.append(cols)
+            vals_count.append(np.ones_like(vals, dtype=np.int32))
+            log.debug(f"Count matrix updated for triangle {np.ones_like(vals, dtype=np.int32)}")
+            # break
+        # Combine all updates in a single sparse build
+        rows_all = np.concatenate(rows_all)
+        cols_all = np.concatenate(cols_all)
+        vals_all = np.concatenate(vals_all, dtype=np.float32)
+        rows_count = np.concatenate(rows_count)
+        cols_count = np.concatenate(cols_count)
+        vals_count = np.concatenate(vals_count)
+
+        # Construct sparse sum and count matrices
+        sum_matrix = sparse.coo_matrix(
+            (vals_all, (rows_all, cols_all)), shape=(matrix_size, matrix_size), dtype=np.float32
+        ).tocsr()
+        count_matrix = sparse.coo_matrix(
+            (vals_count, (rows_count, cols_count)), shape=(matrix_size, matrix_size), dtype=np.int32
+        ).tocsr()
+
+        # Convert once at the end
+        # sum_matrix = sum_matrix.tocsr()
+        # count_matrix = count_matrix.tocsr()
+
+        mean_matrix = sum_matrix.copy().astype(np.float32)
+        nonzero_mask = count_matrix.data != 0
+        mean_matrix.data[nonzero_mask] = sum_matrix.data[nonzero_mask] / count_matrix.data[nonzero_mask]
+
+    # return hic_diagonal_sharpen(mean_matrix)
+    return mean_matrix  
+
+
+def unsharp_mask_hic(matrix, sigma=1.0, strength=1.0):
+    """
+    Unsharp masking - good for TAD boundaries
+    """
+    if issparse(matrix):
+        matrix = matrix.toarray()
+    
+    blurred = ndimage.gaussian_filter(matrix, sigma=sigma)
+    sharpened = matrix + strength * (matrix - blurred)
+    
+    return np.clip(sharpened, 0, None)
+
+def sharpen_hic(matrix, strength=0.5):
+    """
+    Laplacian sharpening for dense 2D array
+    """
+    if issparse(matrix):
+        matrix = matrix.toarray()
+    
+    # Laplacian kernel
+    laplacian = np.array([
+        [0, -1, 0],
+        [-1, 4, -1],
+        [0, -1, 0]
+    ])
+    
+    edges = ndimage.convolve(matrix, laplacian)
+    sharpened = matrix + strength * edges
+    
+    # Ensure non-negative (Hi-C counts)
+    sharpened = np.clip(sharpened, 0, None)
+    
+    return sharpened
+
+def hic_diagonal_sharpen(matrix, strength=0.5, decay=0.3):
+    """
+    Stronger sharpening near diagonal (TADs), gentler for long-range
+    """
+    if issparse(matrix):
+        matrix = matrix.toarray()
+    
+    size = matrix.shape[0]
+    
+    # Distance-from-diagonal weight matrix
+    i, j = np.indices((size, size))
+    distance = np.abs(i - j)
+    weight = np.exp(-distance / (size * decay))
+    
+    # Laplacian edges
+    laplacian = np.array([
+        [0, -1, 0],
+        [-1, 4, -1],
+        [0, -1, 0]
+    ])
+    edges = ndimage.convolve(matrix, laplacian)
+    
+    # Weighted sharpening
+    sharpened = matrix + strength * weight * edges
+    
+    return np.clip(sharpened, 0, None)
+
+
+def rebuildChromosomeToFile(pJob):
+    """Rebuild one chromosome from its predicted triangles and save it.
+
+    Everything a chromosome needs is in `pJob`, and nothing is returned but the
+    path, so this is safe to hand to a process pool: the 5 GB of triangles are
+    read from disk by the worker (memory-mapped, so only the windows actually
+    touched are paged in) and the assembled matrix is written by the worker.
+    Neither ever crosses the process boundary.
+
+    It lives in this module, and not in hicgan.predict, on purpose. A spawned
+    worker re-imports the module that defines its target, and importing
+    hicgan.predict would drag TensorFlow into every worker: seconds of start-up
+    and hundreds of MB of RAM each, for code that only uses numpy and scipy.
+    """
+    (predictionFile, matrixFile, windowSize, flankingSize, saveMemory,
+     windowStarts, matrixSize, targetValueRange, multiplier) = pJob
+    predTriangles = np.load(predictionFile, mmap_mode="r")
+    predMatrix = rebuildMatrix(pArrayOfTriangles=predTriangles,
+                               pWindowSize=windowSize,
+                               pFlankingSize=flankingSize,
+                               pSaveMemory=saveMemory,
+                               pWindowStarts=windowStarts,
+                               pMatrixSize=matrixSize,
+                               pProgress=False)
+    del predTriangles
+    if targetValueRange is not None:
+        predMatrix = fromUnitRange(predMatrix, *targetValueRange)
+    else:
+        predMatrix = scaleArray(predMatrix) * multiplier
+    if not sparse.isspmatrix(predMatrix):
+        predMatrix = sparse.csr_matrix(predMatrix)
+    sparse.save_npz(matrixFile, predMatrix.tocsr())
+    nnz = int(predMatrix.nnz)
+    del predMatrix
+    return matrixFile, nnz
+
+
+def rebuildChromosomeFromBand(pJob):
+    """Turn one chromosome's accumulated band into a saved matrix chunk.
+
+    The counterpart of rebuildChromosomeToFile for predictions that were summed
+    on the GPU. Nothing is folded here: the summing already happened, so this
+    only divides by the coverage and writes the sparse matrix.
+    """
+    (bandFile, matrixFile, windowSize, matrixSize, windowStarts,
+     targetValueRange, multiplier) = pJob
+    band = np.load(bandFile, mmap_mode="r")
+    startCount = np.bincount(np.asarray(windowStarts, dtype=np.int64),
+                             minlength=int(matrixSize))[:int(matrixSize)]
+    predMatrix = bandToCsr(band, startCount, windowSize, matrixSize)
+    del band
+    if targetValueRange is not None:
+        predMatrix = fromUnitRange(predMatrix, *targetValueRange)
+    else:
+        predMatrix = scaleArray(predMatrix) * multiplier
+    if not sparse.isspmatrix(predMatrix):
+        predMatrix = sparse.csr_matrix(predMatrix)
+    sparse.save_npz(matrixFile, predMatrix.tocsr())
+    nnz = int(predMatrix.nnz)
+    del predMatrix
+    return matrixFile, nnz
+
+
+def rebuildProcessCount(pRequested, pWindowSize, pMatrixSizes, pJobCount):
+    """How many chromosomes to rebuild at once without running out of RAM.
+
+    A worker's peak is dominated by the dense band it accumulates into,
+    windowSize x matrixSize float32, plus the CSR it builds from it. Two and a
+    half times the band is a safe allowance. The largest chromosome in the job
+    list sets the figure, because the pool may well be running it.
+
+    pRequested of 0 means "decide from the machine". Anything else is taken as
+    given, which is what a queueing system with its own memory limit wants.
+    """
+    if pRequested and int(pRequested) > 0:
+        return max(1, min(int(pRequested), pJobCount))
+    sizes = [s for s in (pMatrixSizes or []) if s]
+    largest = max(sizes) if sizes else 0
+    perWorker = 2.5 * int(pWindowSize) * largest * 4 if largest else 0
+    available = None
+    try:
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    available = int(line.split()[1]) * 1024
+                    break
+    except OSError:
+        pass
+    byMemory = pJobCount
+    if available and perWorker:
+        # leave a third of what is free alone; this runs alongside other things
+        byMemory = max(1, int((available * 0.66) // perWorker))
+    byCpu = max(1, (os.cpu_count() or 2) - 1)
+    n = max(1, min(pJobCount, byCpu, byMemory, 8))
+    if perWorker:
+        log.info("rebuilding with %d processes (~%.1f GB each, %.1f GB available)",
+                 n, perWorker / 2**30, (available or 0) / 2**30)
+    return n
+
 
 def writeCooler(pMatrixList, pBinSizeInt, pOutfile, pChromosomeList, pChromSizeList=None,  pMetadata=None):
     #takes a matrix as numpy array or sparse matrix and writes a cooler matrix from it
@@ -423,6 +839,15 @@ def writeCooler(pMatrixList, pBinSizeInt, pOutfile, pChromosomeList, pChromSizeL
     #         })
     #         pixels_tmp.sort_values(by=['bin1_id','bin2_id'], inplace=True)
     #         yield pixels_tmp
+    def _load_matrix_entry(matrix_entry):
+        if isinstance(matrix_entry, str):
+            if matrix_entry.endswith(".npz"):
+                return sparse.load_npz(matrix_entry)
+            if matrix_entry.endswith(".npy"):
+                return np.load(matrix_entry)
+            raise ValueError(f"Unsupported matrix file format: {matrix_entry}")
+        return matrix_entry
+
     def pixelGenerator(pMatrixList, pOffsetList, sort_pixels=False, dtype=np.float32):
         """
         Memory-efficient generator that yields pixel DataFrames from sparse Hi-C matrices.
@@ -444,7 +869,8 @@ def writeCooler(pMatrixList, pBinSizeInt, pOutfile, pChromosomeList, pChromSizeL
         pandas.DataFrame
             Columns: ['bin1_id', 'bin2_id', 'count']
         """
-        for matrix, offset in zip(pMatrixList, pOffsetList):
+        for matrix_entry, offset in zip(pMatrixList, pOffsetList):
+            matrix = _load_matrix_entry(matrix_entry)
             log.debug(f"Generating pixels for matrix with offset {offset}")
 
             # Ensure matrix is sparse in COO format
@@ -474,6 +900,7 @@ def writeCooler(pMatrixList, pBinSizeInt, pOutfile, pChromosomeList, pChromSizeL
                 pixels_tmp.sort_values(['bin1_id', 'bin2_id'], inplace=True, ignore_index=True)
 
             yield pixels_tmp
+            del matrix
 
         # log.info("Sorting pixel DataFrame if requested")
         # if sort_pixels and len(pixels_tmp) > 1:
@@ -498,7 +925,8 @@ def writeCooler(pMatrixList, pBinSizeInt, pOutfile, pChromosomeList, pChromSizeL
         return
     bins = pd.DataFrame(columns=['chrom','start','end'])
     offsetList = [0]
-    for i, (matrix, chrom) in enumerate(zip(pMatrixList,pChromosomeList)):
+    for i, (matrix_entry, chrom) in enumerate(zip(pMatrixList,pChromosomeList)):
+        matrix = _load_matrix_entry(matrix_entry)
         log.info(f"Processing chromosome {chrom} ({i+1}/{len(pChromosomeList)})")
         #the chromosome size may not be integer-divisible by the bin size
         #so specifying the real chrom size is possible, but the
@@ -521,6 +949,7 @@ def writeCooler(pMatrixList, pBinSizeInt, pOutfile, pChromosomeList, pChromSizeL
         bins = pd.concat([bins, bins_tmp], ignore_index=True)
         # bins = bins.append(bins_tmp, ignore_index=True)
         offsetList.append(offsetList[-1] + bins_tmp.shape[0])
+        del matrix
 
     #correct dtypes for joint dataframe
     bins["start"] = bins["start"].astype("uint32")
