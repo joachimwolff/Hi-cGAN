@@ -188,6 +188,13 @@ def parse_arguments(args=None):
                         help="If set, attempt to resume training by loading the latest checkpoint from the output folder.")
     parser.add_argument("--mixedPrecision", "-mp", required=False, action='store_true',
                         help="Enable mixed-precision (float16) training. Faster and uses less GPU memory on modern GPUs; does not change system RAM usage.")
+    parser.add_argument("--seed", "-sd", required=False,
+                        type=int, default=None,
+                        help="Seed for Python, NumPy and TensorFlow random number "
+                             "generators. Set it to make a run repeatable, or to "
+                             "obtain independent runs of the same configuration "
+                             "by varying it. Unset leaves the generators "
+                             "unseeded, which is the previous behaviour.")
     parser.add_argument("--keepTFRecords", "-k", required=False,
                         action='store_true',
                         default=False,
@@ -495,7 +502,16 @@ def delete_model_files(pTFRecordFiles):
 
 def main(args=None):
     args = parse_arguments().parse_args(args)
-    print("foo test 1234")
+
+    #seed every generator that can affect a run: weight initialisation, the
+    #shuffle buffer and dropout all draw from these
+    if args.seed is not None:
+        import random
+        os.environ["PYTHONHASHSEED"] = str(args.seed)
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        tf.random.set_seed(args.seed)
+        print("random seed set to %d" % args.seed)
 
     # Resolve --targetValueRange once, here, so the training path gets a plain
     # (min, max) tuple or None.
